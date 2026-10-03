@@ -219,6 +219,73 @@ export const SCENARIOS: readonly Scenario[] = [
     observe: ['API utilisation jumping although its own processing time is unchanged', 'rejections at the APIs', 'how long recovery takes after 10s'],
   }),
   scenario({
+    id: 'retry-storm',
+    name: 'Retry storm',
+    description:
+      'A database runs at 80% of capacity. At 3s it slows down for one second — a blip. Clients retry aggressively: each slow attempt is abandoned and retried, but the abandoned work stays in the database’s queue. The blip never ends.',
+    category: 'Failures',
+    difficulty: 'advanced',
+    seed: 'retry-storm',
+    durationMs: 14_000,
+    nodes: [
+      {
+        id: 'client',
+        type: 'client',
+        label: 'Clients (retry ×5, no backoff)',
+        config: { callTimeoutMs: 200, retry: { maxRetries: 5, backoff: 'none' } },
+      },
+      { id: 'api', type: 'api', label: 'API', config: { processing: 2, concurrency: 200, queueCapacity: 400 } },
+      { id: 'db', type: 'database', label: 'Database', config: { readLatency: 40, concurrency: 4, queueCapacity: 300 } },
+    ],
+    links: [
+      { from: 'client', to: 'api', latency: 5 },
+      { from: 'api', to: 'db', latency: 2 },
+    ],
+    layout: { client: { x: 0, y: 0 }, api: { x: 300, y: 0 }, db: { x: 600, y: 0 } },
+    workloads: [{ id: 'reads', clientId: 'client', operation: 'DB_READ', arrival: { kind: 'poisson', ratePerSec: 80 }, deadlineMs: 3000 }],
+    faults: [{ id: 'blip', kind: 'latency_spike', at: 3000, linkId: 'api->db', latency: 400, durationMs: 1000 }],
+    learningObjectives: [
+      'Retries multiply load exactly when a dependency can least afford it.',
+      'An abandoned attempt is not free: the work it started keeps consuming the dependency’s capacity.',
+      'A one-second trigger becomes a permanent outage — a metastable failure. Remove the trigger and the system still does not recover.',
+      'Backoff and jitter alone do not fix it here; shedding load (a circuit breaker) does. Try it in What-if.',
+    ],
+    observe: ['success rate after 4s, when the blip is over', 'retries per second', 'the database’s queue pinned at capacity'],
+  }),
+  scenario({
+    id: 'circuit-breaker',
+    name: 'Circuit breaker',
+    description:
+      'The API loses its database for three seconds behind a network partition. Its circuit breaker opens after five failures, fails fast instead of waiting, probes after each cooldown, and closes once the database answers again.',
+    category: 'Failures',
+    difficulty: 'intermediate',
+    seed: 'circuit-breaker',
+    durationMs: 10_000,
+    nodes: [
+      { id: 'client', type: 'client', label: 'Clients' },
+      {
+        id: 'api',
+        type: 'api',
+        label: 'API (breaker)',
+        config: { processing: 2, callTimeoutMs: 200, circuitBreaker: { failureThreshold: 5, cooldownMs: 1000 } },
+      },
+      { id: 'db', type: 'database', label: 'Database', config: { readLatency: 10 } },
+    ],
+    links: [
+      { from: 'client', to: 'api', latency: 5 },
+      { from: 'api', to: 'db', latency: 5 },
+    ],
+    layout: { client: { x: 0, y: 0 }, api: { x: 300, y: 0 }, db: { x: 600, y: 0 } },
+    workloads: [{ id: 'reads', clientId: 'client', operation: 'DB_READ', arrival: { kind: 'constant', ratePerSec: 50 }, deadlineMs: 1500 }],
+    faults: [{ id: 'split', kind: 'partition', at: 2000, groups: [['api'], ['db']], healAfter: 3000 }],
+    learningObjectives: [
+      'Without a breaker, every request during the outage would wait out its timeout; with one, they fail in milliseconds.',
+      'Failing fast protects the caller’s capacity and gives the dependency room to recover.',
+      'Half-open probes test the water with one request instead of releasing the whole flood at once.',
+    ],
+    observe: ['the circuit state chart in Metrics', 'failed requests taking ~10ms instead of 200ms', 'the single successful probe that closes the circuit'],
+  }),
+  scenario({
     id: 'message-duplication',
     name: 'Message duplication',
     description:

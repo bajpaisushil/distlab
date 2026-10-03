@@ -146,12 +146,12 @@ export function describe(event: SimEvent): string {
     }
     case 'REQUEST_COMPLETED': {
       const p = (event as SimEvent<'REQUEST_COMPLETED'>).payload;
-      return `${p.requestId} completed in ${round(p.latency)}ms via ${p.path.join(' -> ')}`;
+      return `${p.requestId} completed in ${round(p.latency)}ms via ${p.path.join(' -> ')}${p.attempts > 1 ? ` after ${p.attempts} attempts` : ''}`;
     }
     case 'REQUEST_FAILED': {
       const p = (event as SimEvent<'REQUEST_FAILED'>).payload;
       const where = p.failedAt ? ` at ${p.failedAt}` : '';
-      return `${p.requestId} failed after ${round(p.latency)}ms: ${p.reason}${where}`;
+      return `${p.requestId} failed after ${round(p.latency)}ms: ${p.reason}${where}${p.attempts > 1 ? ` (${p.attempts} attempts)` : ''}`;
     }
     case 'MESSAGE_SENT': {
       const p = (event as SimEvent<'MESSAGE_SENT'>).payload;
@@ -172,7 +172,9 @@ export function describe(event: SimEvent): string {
     }
     case 'TIMEOUT': {
       const p = (event as SimEvent<'TIMEOUT'>).payload;
-      return `${p.nodeId} gave up on ${p.requestId} at deadline ${round(p.deadlineAt)}ms`;
+      return p.scope === 'call'
+        ? `${p.nodeId}'s attempt ${p.attempt ?? 1} at ${p.requestId}${p.waitedFor ? ` to ${p.waitedFor}` : ''} timed out`
+        : `${p.nodeId} gave up on ${p.requestId} at its deadline (${round(p.deadlineAt)}ms)`;
     }
     case 'NODE_FAILED': {
       const p = (event as SimEvent<'NODE_FAILED'>).payload;

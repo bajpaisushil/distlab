@@ -111,6 +111,28 @@ describe('each scenario shows what it says it shows', () => {
     expect(new Set(started.map((e) => e.payload.serviceTime))).toEqual(new Set([10]));
   });
 
+  it('retry-storm: a one-second blip becomes a lasting outage', () => {
+    const world = run('retry-storm');
+    const log = world.simulation.log;
+    const before = log.byType('REQUEST_COMPLETED').filter((e) => e.at < 3000).length;
+    expect(before).toBeGreaterThan(200);
+    const lateCreated = log.byType('REQUEST_CREATED').filter((e) => e.at > 9000).length;
+    const lateCompleted = log.byType('REQUEST_COMPLETED').filter((e) => e.at > 9000).length;
+    expect(lateCompleted / lateCreated).toBeLessThan(0.1);
+    expect(world.snapshot().modules.reliability.retries).toBeGreaterThan(1000);
+  });
+
+  it('circuit-breaker: opens, fails fast, probes, and closes after the partition heals', () => {
+    const world = run('circuit-breaker');
+    const log = world.simulation.log;
+    expect(log.byType('CIRCUIT_OPENED').length).toBeGreaterThan(1);
+    expect(log.byType('CIRCUIT_CLOSED')).toHaveLength(1);
+    expect(log.byType('CIRCUIT_CLOSED')[0]!.at).toBeGreaterThan(5000);
+    const fastFails = log.byType('REQUEST_FAILED').filter((e) => e.payload.reason === 'circuit_open');
+    expect(fastFails.length).toBeGreaterThan(50);
+    expect(Math.max(...fastFails.map((e) => e.payload.latency))).toBeLessThan(50);
+  });
+
   it('message-duplication: the work happens more often than it was asked for', () => {
     const world = run('message-duplication');
     const created = world.simulation.log.byType('REQUEST_CREATED').length;

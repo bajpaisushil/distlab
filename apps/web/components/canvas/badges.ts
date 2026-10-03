@@ -19,8 +19,15 @@ const STRATEGY_SHORT: Record<string, string> = {
  * replica. Read from configuration and telemetry; a subsystem with nothing
  * to say contributes nothing.
  */
-export function nodeBadges(node: NodeSpec, _modules: ModuleTelemetry | undefined): Badge[] {
+export function nodeBadges(node: NodeSpec, modules: ModuleTelemetry | undefined): Badge[] {
   const badges: Badge[] = [];
+  for (const circuit of modules?.reliability.circuits ?? []) {
+    if (circuit.nodeId !== node.id || circuit.state === 'closed') continue;
+    badges.push({
+      label: `${circuit.state === 'open' ? 'circuit open' : 'half-open'} → ${circuit.target}`,
+      tone: circuit.state === 'open' ? 'serious' : 'warning',
+    });
+  }
   if (node.type === 'load_balancer' || node.type === 'gateway') {
     badges.push({ label: STRATEGY_SHORT[routingStrategyOf(node.config ?? {})] ?? 'routing' });
   }

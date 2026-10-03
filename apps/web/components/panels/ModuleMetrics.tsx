@@ -1,6 +1,7 @@
 'use client';
 
 import { RoutingMetrics } from '@/components/modules/RoutingMetrics';
+import { ReliabilityMetrics } from '@/components/modules/ReliabilityMetrics';
 
 /**
  * Subsystem sections of the metrics panel. Each renders its own telemetry
@@ -10,6 +11,7 @@ export function ModuleMetrics() {
   return (
     <>
       <RoutingMetrics />
+      <ReliabilityMetrics />
     </>
   );
 }

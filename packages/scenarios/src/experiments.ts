@@ -51,6 +51,11 @@ const NODE_FIELDS = new Set([
   'ewmaAlpha',
   'ewmaTtlMs',
   'virtualNodes',
+  // reliability
+  'callTimeoutMs',
+  'retry',
+  'circuitBreaker',
+  'bulkheads',
 ]);
 
 const LINK_FIELDS = new Set([

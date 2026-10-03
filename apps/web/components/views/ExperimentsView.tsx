@@ -10,7 +10,7 @@ import { Icon } from '@/components/ui/icons';
 import { RunComparison } from './RunResults';
 
 type Preset = { label: string; question: string; changes: (ctx: PresetContext) => ExperimentChange[] | undefined };
-type PresetContext = { db?: string; firstApi?: string; balancer?: string; duration: number };
+type PresetContext = { db?: string; firstApi?: string; balancer?: string; client?: string; duration: number };
 
 const PRESETS: readonly Preset[] = [
   { label: 'Traffic doubles', question: 'What happens if traffic doubles?', changes: () => [{ kind: 'scale_traffic', factor: 2 }] },
@@ -32,6 +32,17 @@ const PRESETS: readonly Preset[] = [
     changes: ({ balancer }) => (balancer ? [{ kind: 'set_node', nodeId: balancer, field: 'routing', value: 'least_connections' }] : undefined),
   },
   {
+    label: 'Clients get a circuit breaker',
+    question: 'What happens if the clients stop calling a dependency that keeps failing?',
+    changes: ({ client }) =>
+      client
+        ? [
+            { kind: 'set_node', nodeId: client, field: 'circuitBreaker', value: { failureThreshold: 10, cooldownMs: 2000 } },
+            { kind: 'set_node', nodeId: client, field: 'retry', value: { maxRetries: 2, backoff: 'exponential', baseDelayMs: 300, jitter: 'full' } },
+          ]
+        : undefined,
+  },
+  {
     label: 'Different luck',
     question: 'How much of the result is luck? Same configuration, different seed.',
     changes: () => [{ kind: 'set_seed', seed: 'what-if-reseed' }],
@@ -51,6 +62,7 @@ export function ExperimentsView() {
   const [customValue, setCustomValue] = useState<number | undefined>(undefined);
 
   const ctx: PresetContext = {
+    ...(spec.nodes.find((n) => n.type === 'client') ? { client: spec.nodes.find((n) => n.type === 'client')!.id } : {}),
     ...(spec.nodes.find((n) => n.type === 'load_balancer' || n.type === 'gateway')
       ? { balancer: spec.nodes.find((n) => n.type === 'load_balancer' || n.type === 'gateway')!.id }
       : {}),

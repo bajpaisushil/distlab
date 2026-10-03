@@ -1,11 +1,25 @@
 import {
+  CLOSED,
+  backoffDelay,
+  permit,
+  record,
+  releaseProbe,
+  wouldPermit,
+  type BreakerPolicy,
+  type BreakerState,
+  type BreakerTransition,
+} from '@distlab/algorithms';
+import {
+  RETRYABLE_STATUSES,
   sampleLatency,
+  type BulkheadPolicy,
   type EventId,
   type EventPayloadMap,
   type EventType,
   type Message,
   type MessageId,
   type MessageKind,
+  type NodeConfig,
   type NodeId,
   type NodeType,
   type OperationType,
@@ -28,6 +42,28 @@ import type { SimulatedNetwork } from '@distlab/network';
 import type { NodeRegistry } from './node-registry.js';
 import type { DataPlane, EmitMeta, Registrar, RoutingExclusionView, RoutingPolicy, SimModule } from './modules/types.js';
 
+/**
+ * One downstream call a node is making, across all its attempts. Clients make
+ * calls for the requests they originate; servers make them for the work they
+ * forward. Both go through the same attempt logic — timeouts, retries and
+ * circuit breakers behave identically wherever they are configured.
+ */
+interface Call {
+  /** Attempts made so far; the current one when one is in flight. */
+  attempt: number;
+  outboundSpan: SpanId | undefined;
+  target: NodeId | undefined;
+  sentAt: SimTime;
+  /** Per-attempt timeout, if the node has a call timeout. */
+  callTimer: EventId | undefined;
+  /** Pending RETRY event while backing off. */
+  retryTimer: EventId | undefined;
+  /** Previous backoff delay, which decorrelated jitter grows from. */
+  lastDelay: number | undefined;
+  /** This attempt is a half-open circuit probe. */
+  probe: boolean;
+}
+
 /** One delivered request being handled by one node. */
 interface WorkItem {
   /**
@@ -42,12 +78,12 @@ interface WorkItem {
   readonly arrivedAt: SimTime;
   /** When it took a concurrency slot; -1 while still queued. */
   startedAt: SimTime;
+  /** The request's end-to-end deadline at this node. */
   timeoutEventId: EventId;
-  state: 'queued' | 'processing' | 'deferred' | 'awaiting_downstream';
-  outboundSpan: SpanId | undefined;
-  /** Downstream node the current call went to, and when — for routing feedback. */
-  target: NodeId | undefined;
-  dispatchedAt: SimTime;
+  state: 'queued' | 'processing' | 'deferred' | 'calling' | 'retry_wait';
+  /** The bulkhead class it was admitted under, if any. */
+  readonly bulkhead: string | undefined;
+  call: Call;
 }
 
 /** A request the client originated and is still waiting on. */
@@ -55,10 +91,14 @@ interface OriginRecord {
   readonly requestId: RequestId;
   readonly traceId: TraceId;
   readonly clientId: NodeId;
+  readonly rootSpan: SpanId;
   readonly startedAt: SimTime;
-  readonly target: NodeId;
+  readonly body: RequestBody;
+  readonly sizeBytes: number;
+  /** The end-to-end deadline. */
   timeoutEventId: EventId;
-  settled: boolean;
+  state: 'calling' | 'retry_wait';
+  call: Call;
 }
 
 class NodeWorker {
@@ -66,8 +106,12 @@ class NodeWorker {
   readonly waiting: WorkItem[] = [];
   /** Delivered message id -> work. */
   readonly work = new Map<MessageId, WorkItem>();
-  /** Outbound span -> the work waiting on it. */
+  /** Outbound span of the current attempt -> the work waiting on it. */
   readonly outbound = new Map<SpanId, MessageId>();
+  /** Bulkhead class -> requests holding a slot. */
+  readonly active = new Map<string, number>();
+  /** Bulkhead class -> requests waiting. */
+  readonly queued = new Map<string, number>();
 }
 
 export interface BeginRequestParams {
@@ -96,9 +140,33 @@ export interface NodeRuntimeState {
     readonly waiting: readonly MessageId[];
     readonly work: readonly WorkItem[];
     readonly outbound: readonly (readonly [SpanId, MessageId])[];
+    readonly active: readonly (readonly [string, number])[];
+    readonly queued: readonly (readonly [string, number])[];
   }[];
-  readonly origins: readonly (readonly [SpanId, OriginRecord])[];
+  readonly origins: readonly OriginRecord[];
+  readonly breakers: readonly (readonly [string, BreakerState])[];
 }
+
+type Caller =
+  | { readonly kind: 'origin'; readonly node: SimNode; readonly origin: OriginRecord }
+  | { readonly kind: 'work'; readonly node: SimNode; readonly worker: NodeWorker; readonly item: WorkItem };
+
+type RouteOutcome =
+  /** Nothing is wired downstream; this node serves the request itself. */
+  | { kind: 'terminal' }
+  /** A downstream tier exists but none of it is usable right now. */
+  | { kind: 'unreachable' }
+  /** Usable targets exist, but every one's circuit is open. */
+  | { kind: 'circuit_open'; targets: NodeId[] }
+  | { kind: 'forward'; target: SimNode };
+
+const DEFAULT_RETRY = {
+  backoff: 'exponential' as const,
+  baseDelayMs: 50,
+  maxDelayMs: 2000,
+  multiplier: 2,
+  jitter: 'full' as const,
+};
 
 /**
  * Turns messages into work and work into messages.
@@ -109,6 +177,13 @@ export interface NodeRuntimeState {
  * thread-pool exhaustion and backpressure emerge on their own instead of
  * having to be special-cased — a slow database really does consume the API
  * tier's capacity.
+ *
+ * Calls downstream are made in attempts. An attempt ends with a response, a
+ * per-call timeout, or abandonment; a failed attempt may be retried after a
+ * backoff, possibly on another target, and every outcome feeds the routing
+ * policy and the node's circuit breakers. Retries cost real capacity — a late
+ * response to an abandoned attempt still consumed the work it took — which is
+ * exactly how retry storms happen.
  *
  * What a node *does* with a request is delegated: the data plane decides
  * whether storage answers it, the routing policy picks the next hop, and
@@ -127,8 +202,11 @@ export class NodeRuntime {
   private readonly byName = new Map<string, SimModule>();
 
   private workers = new Map<NodeId, NodeWorker>();
-  /** Client-side outbound span -> the request it represents. */
-  private origins = new Map<SpanId, OriginRecord>();
+  private origins = new Map<RequestId, OriginRecord>();
+  /** Outbound span of a client's current attempt -> its request. */
+  private originByOutbound = new Map<SpanId, RequestId>();
+  /** `${node}|${target}` -> circuit state. */
+  private breakers = new Map<string, BreakerState>();
 
   constructor(options: NodeRuntimeOptions) {
     this.context = options.context;
@@ -148,13 +226,16 @@ export class NodeRuntime {
     on('MESSAGE_RECEIVED', (event) => this.onMessageReceived(event));
     on('REQUEST_PROCESSING_COMPLETED', (event) => this.onProcessingCompleted(event));
     on('TIMEOUT', (event) => this.onTimeout(event));
+    on('RETRY', (event) => this.onRetry(event));
     on('TIMER', (event) => this.onTimer(event));
     on('NODE_FAILED', (event) => this.onNodeFailed(event));
     on('NODE_RECOVERED', (event) => this.onNodeRecovered(event));
     for (const module of this.modules) module.attach(on);
   }
 
-  /** Creates a request at a client and sends it to its first hop. */
+  // --- requests from clients ----------------------------------------------
+
+  /** Creates a request at a client and sends its first attempt. */
   beginRequest(params: BeginRequestParams, causedBy?: EventId): RequestId | undefined {
     const client = this.registry.get(params.clientId);
     if (!client || client.state.status === 'failed') return undefined;
@@ -164,6 +245,7 @@ export class NodeRuntime {
     const rootSpan = this.context.ids.span();
     const now = this.context.now();
     const deadlineAt = now + params.deadlineMs;
+    const cause = causedBy !== undefined ? { causedBy } : {};
 
     this.emit(
       'REQUEST_CREATED',
@@ -176,7 +258,7 @@ export class NodeRuntime {
         spanId: rootSpan,
         ...(params.key !== undefined ? { key: params.key } : {}),
       },
-      { nodeId: client.id, traceId, ...(causedBy !== undefined ? { causedBy } : {}) },
+      { nodeId: client.id, traceId, ...cause },
     );
 
     const body: RequestBody = {
@@ -186,57 +268,26 @@ export class NodeRuntime {
       deadlineAt,
       ...(params.key !== undefined ? { key: params.key } : {}),
     };
-    const route = this.route(client, body);
-    if (route.kind !== 'forward') {
-      this.emit(
-        'REQUEST_FAILED',
-        {
-          requestId,
-          traceId,
-          clientId: client.id,
-          latency: 0,
-          status: 'unreachable',
-          reason: route.kind === 'terminal' ? 'no_route' : 'unreachable',
-        },
-        { nodeId: client.id, traceId, ...(causedBy !== undefined ? { causedBy } : {}) },
-      );
-      return requestId;
-    }
-
-    const target = route.target;
-    const outboundSpan = this.context.ids.span();
-    const timeoutEventId = this.scheduleTimeout(client.id, requestId, outboundSpan, deadlineAt, target.id);
-    this.origins.set(outboundSpan, {
+    const origin: OriginRecord = {
       requestId,
       traceId,
       clientId: client.id,
+      rootSpan,
       startedAt: now,
-      target: target.id,
-      timeoutEventId,
-      settled: false,
-    });
-
-    this.emit(
-      'REQUEST_ROUTED',
-      { requestId, from: client.id, to: target.id, hop: 0, strategy: this.routing.strategyName(client) },
-      { nodeId: client.id, traceId, ...(causedBy !== undefined ? { causedBy } : {}) },
-    );
-    this.routing.onDispatch(client, target.id, { requestId, traceId, ...(causedBy !== undefined ? { causedBy } : {}) });
-
-    this.network.send({
-      kind: 'REQUEST',
-      source: client.id,
-      destination: target.id,
-      type: params.operation,
-      payload: body,
+      body,
       sizeBytes: params.sizeBytes,
-      requestId,
-      traceId,
-      spanId: outboundSpan,
-      parentSpanId: rootSpan,
-      hop: 0,
-      ...(causedBy !== undefined ? { causedBy } : {}),
-    });
+      timeoutEventId: this.scheduleTimeout({
+        nodeId: client.id,
+        requestId,
+        spanId: rootSpan,
+        scope: 'deadline',
+        deadlineAt,
+      }),
+      state: 'calling',
+      call: newCall(),
+    };
+    this.origins.set(requestId, origin);
+    this.startCall({ kind: 'origin', node: client, origin }, causedBy);
     return requestId;
   }
 
@@ -325,7 +376,7 @@ export class NodeRuntime {
 
     if (message.kind === 'RESPONSE') {
       if (node.type === 'client') {
-        this.settleOrigin(node, message as ResponseMessage, event.id);
+        this.onOriginResponse(node, message as ResponseMessage, event.id);
         return;
       }
       const serving = this.byNodeType.get(node.type);
@@ -333,7 +384,7 @@ export class NodeRuntime {
         serving.onMessage(node, message, event);
         return;
       }
-      this.onResponse(node, message as ResponseMessage, event.id);
+      this.onWorkResponse(node, message as ResponseMessage, event.id);
       return;
     }
 
@@ -367,28 +418,38 @@ export class NodeRuntime {
 
     const worker = this.workerFor(node.id);
     const body = message.payload;
+    const bulkhead = bulkheadFor(node.config, body.workloadId);
     const item: WorkItem = {
       workId: message.id,
       spanId: message.spanId,
       inbound: message,
       arrivedAt: this.context.now(),
       startedAt: -1,
-      timeoutEventId: this.scheduleTimeout(node.id, message.requestId, message.spanId, body.deadlineAt, undefined, message.id),
+      timeoutEventId: this.scheduleTimeout({
+        nodeId: node.id,
+        requestId: message.requestId,
+        spanId: message.spanId,
+        workId: message.id,
+        scope: 'deadline',
+        deadlineAt: body.deadlineAt,
+      }),
       state: 'queued',
-      outboundSpan: undefined,
-      target: undefined,
-      dispatchedAt: -1,
+      bulkhead: bulkhead?.name,
+      call: newCall(),
     };
     worker.work.set(item.workId, item);
 
-    if (node.state.inFlight < node.config.concurrency) {
-      this.startProcessing(node, item, causedBy);
+    if (this.hasSlot(node, worker, bulkhead)) {
+      this.startProcessing(node, worker, item, causedBy);
       return;
     }
 
-    if (node.state.queueDepth < node.config.queueCapacity) {
+    const classQueued = bulkhead ? worker.queued.get(bulkhead.name) ?? 0 : 0;
+    const classRoom = !bulkhead || classQueued < (bulkhead.maxQueue ?? node.config.queueCapacity);
+    if (node.state.queueDepth < node.config.queueCapacity && classRoom) {
       worker.waiting.push(item);
       node.state.queueDepth += 1;
+      if (bulkhead) worker.queued.set(bulkhead.name, classQueued + 1);
       this.emit(
         'REQUEST_QUEUED',
         { requestId: message.requestId, nodeId: node.id, queueDepth: node.state.queueDepth },
@@ -397,15 +458,18 @@ export class NodeRuntime {
       return;
     }
 
-    // Saturated: shed load rather than growing an unbounded backlog.
+    // Saturated: shed load rather than growing an unbounded backlog. When the
+    // node itself has room but this class does not, the bulkhead refused it.
+    const bulkheadRefused = bulkhead !== undefined && !classRoom && node.state.queueDepth < node.config.queueCapacity;
     node.state.rejected += 1;
     this.emit(
       'REQUEST_REJECTED',
       {
         requestId: message.requestId,
         nodeId: node.id,
-        reason: 'queue_full',
+        reason: bulkheadRefused ? 'bulkhead_full' : 'queue_full',
         queueDepth: node.state.queueDepth,
+        ...(bulkheadRefused ? { bulkhead: bulkhead.name } : {}),
       },
       { nodeId: node.id, traceId: message.traceId, causedBy },
     );
@@ -413,7 +477,12 @@ export class NodeRuntime {
     this.release(node, worker, item);
   }
 
-  private startProcessing(node: SimNode, item: WorkItem, causedBy: EventId): void {
+  private hasSlot(node: SimNode, worker: NodeWorker, bulkhead: BulkheadPolicy | undefined): boolean {
+    if (node.state.inFlight >= node.config.concurrency) return false;
+    return !bulkhead || (worker.active.get(bulkhead.name) ?? 0) < bulkhead.maxConcurrent;
+  }
+
+  private startProcessing(node: SimNode, worker: NodeWorker, item: WorkItem, causedBy: EventId): void {
     const rng = this.context.stream(`node:${node.id}`);
     // An overloaded node does the same work, slower.
     const serviceTime = sampleLatency(this.data.serviceLatency(node, item.inbound.payload), rng) * node.state.slowdown;
@@ -424,6 +493,7 @@ export class NodeRuntime {
     item.state = 'processing';
     item.startedAt = this.context.now();
     node.state.inFlight += 1;
+    if (item.bulkhead) worker.active.set(item.bulkhead, (worker.active.get(item.bulkhead) ?? 0) + 1);
 
     this.emit(
       'REQUEST_PROCESSING_STARTED',
@@ -494,103 +564,285 @@ export class NodeRuntime {
       return;
     }
 
-    const route = this.route(node, body);
-    if (route.kind === 'terminal') {
-      // Nothing is wired downstream: this node is where the request is served.
-      node.state.processed += 1;
-      this.respond(node, item, 'ok', body.path, event.id);
-      this.release(node, worker, item);
-      return;
-    }
-    if (route.kind === 'unreachable') {
-      // There *is* a downstream tier, but none of it can be reached right now.
-      // Answering 'ok' here would quietly paper over an outage.
-      node.state.failed += 1;
-      this.respond(node, item, 'unreachable', body.path, event.id);
-      this.release(node, worker, item);
-      return;
-    }
-    this.forward(node, worker, item, route.target, event.id);
+    item.state = 'calling';
+    this.startCall({ kind: 'work', node, worker, item }, event.id);
   }
 
-  private forward(node: SimNode, worker: NodeWorker, item: WorkItem, target: SimNode, causedBy: EventId): void {
-    const body = item.inbound.payload;
-    const outboundSpan = this.context.ids.span();
-    item.outboundSpan = outboundSpan;
-    item.target = target.id;
-    item.dispatchedAt = this.context.now();
-    item.state = 'awaiting_downstream';
-    worker.outbound.set(outboundSpan, item.workId);
+  // --- calls downstream ---------------------------------------------------
 
+  /** Routes and sends the first attempt, or settles the caller if there is nowhere to go. */
+  private startCall(caller: Caller, causedBy: EventId | undefined): void {
+    const route = this.route(caller.node, bodyOf(caller));
+    switch (route.kind) {
+      case 'forward':
+        this.sendAttempt(caller, route.target, causedBy);
+        return;
+      case 'terminal':
+        if (caller.kind === 'work') {
+          // Nothing is wired downstream: this node is where the request is served.
+          caller.node.state.processed += 1;
+          this.respond(caller.node, caller.item, 'ok', caller.item.inbound.payload.path, causedBy ?? caller.item.timeoutEventId);
+          this.release(caller.node, caller.worker, caller.item);
+        } else {
+          this.finishOrigin(caller.node, caller.origin, { ok: false, status: 'unreachable', reason: 'no_route' }, causedBy);
+        }
+        return;
+      case 'unreachable':
+        // There *is* a downstream tier, but none of it can be reached right now.
+        // Answering 'ok' here would quietly paper over an outage.
+        this.failCall(caller, 'unreachable', undefined, causedBy);
+        return;
+      case 'circuit_open':
+        this.emit(
+          'CIRCUIT_REJECTED',
+          { nodeId: caller.node.id, requestId: requestIdOf(caller), targets: route.targets },
+          { nodeId: caller.node.id, traceId: traceIdOf(caller), ...(causedBy !== undefined ? { causedBy } : {}) },
+        );
+        this.failCall(caller, 'circuit_open', undefined, causedBy);
+        return;
+    }
+  }
+
+  private sendAttempt(caller: Caller, target: SimNode, causedBy: EventId | undefined): void {
+    const node = caller.node;
+    const call = callOf(caller);
+    const now = this.context.now();
+    const body = bodyOf(caller);
+    const requestId = requestIdOf(caller);
+    const traceId = traceIdOf(caller);
+    const cause = causedBy !== undefined ? { causedBy } : {};
+
+    call.attempt += 1;
+    call.target = target.id;
+    call.sentAt = now;
+    call.outboundSpan = this.context.ids.span();
+    call.probe = this.admitThroughBreaker(node, target.id, causedBy);
+
+    if (caller.kind === 'origin') {
+      caller.origin.state = 'calling';
+      this.originByOutbound.set(call.outboundSpan, requestId);
+    } else {
+      caller.item.state = 'calling';
+      caller.worker.outbound.set(call.outboundSpan, caller.item.workId);
+    }
+
+    const hop = caller.kind === 'origin' ? 0 : caller.item.inbound.hop + 1;
     this.emit(
       'REQUEST_ROUTED',
-      {
-        requestId: item.inbound.requestId,
-        from: node.id,
-        to: target.id,
-        hop: item.inbound.hop + 1,
-        strategy: this.routing.strategyName(node),
-      },
-      { nodeId: node.id, traceId: item.inbound.traceId, causedBy },
+      { requestId, from: node.id, to: target.id, hop, strategy: this.routing.strategyName(node) },
+      { nodeId: node.id, traceId, ...cause },
     );
-    this.routing.onDispatch(node, target.id, {
-      requestId: item.inbound.requestId,
-      traceId: item.inbound.traceId,
-      causedBy,
-    });
+    this.routing.onDispatch(node, target.id, { requestId, traceId, ...cause });
+
+    // A call timeout only matters if it would fire before the request's own deadline.
+    const callTimeout = node.config.callTimeoutMs;
+    if (callTimeout !== undefined && now + callTimeout < body.deadlineAt) {
+      call.callTimer = this.scheduleTimeout({
+        nodeId: node.id,
+        requestId,
+        spanId: call.outboundSpan,
+        scope: 'call',
+        deadlineAt: now + callTimeout,
+        waitedFor: target.id,
+        attempt: call.attempt,
+        ...(caller.kind === 'work' ? { workId: caller.item.workId } : {}),
+      });
+    }
 
     this.network.send({
       kind: 'REQUEST',
       source: node.id,
       destination: target.id,
       type: body.operation,
-      payload: { ...body, path: [...body.path, node.id] },
-      sizeBytes: item.inbound.sizeBytes,
-      requestId: item.inbound.requestId,
-      traceId: item.inbound.traceId,
-      spanId: outboundSpan,
-      parentSpanId: item.spanId,
-      hop: item.inbound.hop + 1,
-      causedBy,
+      payload: caller.kind === 'origin' ? body : { ...body, path: [...body.path, node.id] },
+      sizeBytes: caller.kind === 'origin' ? caller.origin.sizeBytes : caller.item.inbound.sizeBytes,
+      requestId,
+      traceId,
+      spanId: call.outboundSpan,
+      parentSpanId: caller.kind === 'origin' ? caller.origin.rootSpan : caller.item.spanId,
+      hop,
+      ...cause,
     });
   }
 
-  private onResponse(node: SimNode, message: ResponseMessage, causedBy: EventId): void {
+  private onOriginResponse(client: SimNode, message: ResponseMessage, causedBy: EventId): void {
+    const requestId = this.originByOutbound.get(message.spanId);
+    // No record: a duplicate, or a late reply to an attempt that was abandoned.
+    if (requestId === undefined) return;
+    const origin = this.origins.get(requestId);
+    if (!origin) return;
+    this.onAttemptOutcome({ kind: 'origin', node: client, origin }, message.payload.status, message, causedBy);
+  }
+
+  private onWorkResponse(node: SimNode, message: ResponseMessage, causedBy: EventId): void {
     const worker = this.workerFor(node.id);
     const workId = worker.outbound.get(message.spanId);
-    // No record means a duplicate or late reply to work already settled.
     if (workId === undefined) return;
-    worker.outbound.delete(message.spanId);
-
     const item = worker.work.get(workId);
     if (!item) return;
+    this.onAttemptOutcome({ kind: 'work', node, worker, item }, message.payload.status, message, causedBy);
+  }
 
-    const ok = message.payload.status === 'ok';
-    if (item.target !== undefined) {
-      this.routing.onOutcome(node, item.target, this.context.now() - item.dispatchedAt, ok);
-      item.target = undefined;
+  /** One attempt ended — answered, or timed out. Decide: done, retry, or give up. */
+  private onAttemptOutcome(
+    caller: Caller,
+    status: ResponseStatus,
+    response: ResponseMessage | undefined,
+    causedBy: EventId,
+  ): void {
+    const node = caller.node;
+    const call = callOf(caller);
+    const target = call.target as NodeId;
+    this.endAttempt(caller);
+    const ok = status === 'ok';
+    this.routing.onOutcome(node, target, this.context.now() - call.sentAt, ok);
+    this.recordBreaker(node, target, ok, causedBy);
+
+    if (ok) {
+      if (caller.kind === 'origin') {
+        this.finishOrigin(node, caller.origin, { ok: true, path: response!.payload.path }, causedBy);
+      } else {
+        node.state.processed += 1;
+        const data = this.data.onDownstreamResponse(node, caller.item.inbound.payload, response!, causedBy) ?? response!.payload.data;
+        this.respond(node, caller.item, 'ok', response!.payload.path, causedBy, data);
+        this.release(node, caller.worker, caller.item);
+      }
+      return;
     }
-    if (ok) node.state.processed += 1;
-    else node.state.failed += 1;
 
-    const data = this.data.onDownstreamResponse(node, item.inbound.payload, message, causedBy) ?? message.payload.data;
-    this.respond(node, item, message.payload.status, message.payload.path, causedBy, data);
+    if (this.scheduleRetry(caller, status, target, causedBy)) return;
+    this.failCall(caller, status, response, causedBy);
+  }
+
+  /** Settles a call that will not be retried, passing the failure upstream. */
+  private failCall(caller: Caller, status: ResponseStatus, response: ResponseMessage | undefined, causedBy: EventId | undefined): void {
+    if (caller.kind === 'origin') {
+      this.finishOrigin(
+        caller.node,
+        caller.origin,
+        {
+          ok: false,
+          status,
+          reason: failureReasonFor(status),
+          ...(response ? { failedAt: response.payload.servedBy } : status === 'circuit_open' || status === 'unreachable' ? { failedAt: caller.node.id } : {}),
+        },
+        causedBy,
+      );
+      return;
+    }
+    const { node, worker, item } = caller;
+    node.state.failed += 1;
+    const path = response?.payload.path ?? item.inbound.payload.path;
+    this.respond(node, item, status, path, causedBy ?? item.timeoutEventId, response?.payload.data);
     this.release(node, worker, item);
   }
 
-  private settleOrigin(client: SimNode, message: ResponseMessage, causedBy: EventId): void {
-    const origin = this.origins.get(message.spanId);
-    if (!origin || origin.settled) return; // duplicate delivery of an answered request
-    origin.settled = true;
-    this.origins.delete(message.spanId);
+  /** Clears the in-flight attempt's bookkeeping so a late reply to it is ignored. */
+  private endAttempt(caller: Caller): void {
+    const call = callOf(caller);
+    if (call.callTimer !== undefined) this.context.cancel(call.callTimer);
+    call.callTimer = undefined;
+    if (call.outboundSpan !== undefined) {
+      if (caller.kind === 'origin') this.originByOutbound.delete(call.outboundSpan);
+      else caller.worker.outbound.delete(call.outboundSpan);
+    }
+    call.outboundSpan = undefined;
+  }
+
+  private scheduleRetry(caller: Caller, status: ResponseStatus, previousTarget: NodeId, causedBy: EventId): boolean {
+    const policy = caller.node.config.retry;
+    if (!policy) return false;
+    const call = callOf(caller);
+    const retriesSoFar = call.attempt - 1;
+    if (retriesSoFar >= policy.maxRetries) return false;
+    if (!(policy.retryOn ?? RETRYABLE_STATUSES).includes(status)) return false;
+
+    const delay = backoffDelay(
+      {
+        backoff: policy.backoff ?? DEFAULT_RETRY.backoff,
+        baseDelayMs: policy.baseDelayMs ?? DEFAULT_RETRY.baseDelayMs,
+        maxDelayMs: policy.maxDelayMs ?? DEFAULT_RETRY.maxDelayMs,
+        multiplier: policy.multiplier ?? DEFAULT_RETRY.multiplier,
+        jitter: policy.jitter ?? DEFAULT_RETRY.jitter,
+      },
+      retriesSoFar + 1,
+      call.lastDelay,
+      this.context.stream(`retry:${caller.node.id}`),
+    );
+    // A retry that cannot start before the deadline would only waste capacity.
+    if (this.context.now() + delay >= bodyOf(caller).deadlineAt) return false;
+
+    call.lastDelay = delay;
+    if (caller.kind === 'origin') caller.origin.state = 'retry_wait';
+    else caller.item.state = 'retry_wait';
+    call.retryTimer = this.context.schedule(
+      {
+        type: 'RETRY',
+        payload: {
+          nodeId: caller.node.id,
+          requestId: requestIdOf(caller),
+          attempt: call.attempt + 1,
+          delayMs: delay,
+          reason: status,
+          previousTarget,
+          ...(caller.kind === 'work' ? { workId: caller.item.workId } : {}),
+        },
+        nodeId: caller.node.id,
+        traceId: traceIdOf(caller),
+        causedBy,
+      },
+      delay,
+    ).id;
+    return true;
+  }
+
+  private onRetry(event: SimEvent<'RETRY'>): void {
+    const caller = this.callerFor(event.payload.nodeId, event.payload.requestId, event.payload.workId);
+    if (!caller) return;
+    const call = callOf(caller);
+    const waiting = caller.kind === 'origin' ? caller.origin.state === 'retry_wait' : caller.item.state === 'retry_wait';
+    if (!waiting || call.retryTimer !== event.id) return;
+    call.retryTimer = undefined;
+
+    const policy = caller.node.config.retry;
+    if (policy?.retrySameTarget && call.target !== undefined) {
+      const previous = this.registry.get(call.target);
+      const reachable = this.network.topology.enabledTargetsOf(caller.node.id).includes(call.target);
+      const breakerOk = this.breakerAllows(caller.node, call.target);
+      if (previous && previous.state.status !== 'failed' && reachable && breakerOk) {
+        this.sendAttempt(caller, previous, event.id);
+        return;
+      }
+    }
+    const route = this.route(caller.node, bodyOf(caller));
+    if (route.kind === 'forward') this.sendAttempt(caller, route.target, event.id);
+    else if (route.kind === 'circuit_open') {
+      this.emit(
+        'CIRCUIT_REJECTED',
+        { nodeId: caller.node.id, requestId: requestIdOf(caller), targets: route.targets },
+        { nodeId: caller.node.id, traceId: traceIdOf(caller), causedBy: event.id },
+      );
+      this.failCall(caller, 'circuit_open', undefined, event.id);
+    } else this.failCall(caller, 'unreachable', undefined, event.id);
+  }
+
+  private finishOrigin(
+    client: SimNode,
+    origin: OriginRecord,
+    outcome:
+      | { ok: true; path: readonly NodeId[] }
+      | { ok: false; status: ResponseStatus; reason: RequestFailureReason; failedAt?: NodeId },
+    causedBy: EventId | undefined,
+  ): void {
+    this.endAttempt({ kind: 'origin', node: client, origin });
+    if (origin.call.retryTimer !== undefined) this.context.cancel(origin.call.retryTimer);
     this.context.cancel(origin.timeoutEventId);
+    this.origins.delete(origin.requestId);
 
     const latency = this.context.now() - origin.startedAt;
-    const path = message.payload.path;
-    const ok = message.payload.status === 'ok';
-    this.routing.onOutcome(client, origin.target, latency, ok);
-
-    if (ok) {
+    const meta = { nodeId: client.id, traceId: origin.traceId, ...(causedBy !== undefined ? { causedBy } : {}) };
+    const attempts = Math.max(1, origin.call.attempt);
+    if (outcome.ok) {
       client.state.processed += 1;
       this.emit(
         'REQUEST_COMPLETED',
@@ -599,14 +851,14 @@ export class NodeRuntime {
           traceId: origin.traceId,
           clientId: client.id,
           latency,
-          hops: Math.max(0, path.length - 1),
-          path,
+          hops: Math.max(0, outcome.path.length - 1),
+          path: outcome.path,
+          attempts,
         },
-        { nodeId: client.id, traceId: origin.traceId, causedBy },
+        meta,
       );
       return;
     }
-
     client.state.failed += 1;
     this.emit(
       'REQUEST_FAILED',
@@ -615,53 +867,45 @@ export class NodeRuntime {
         traceId: origin.traceId,
         clientId: client.id,
         latency,
-        status: message.payload.status,
-        reason: failureReasonFor(message.payload.status),
-        failedAt: message.payload.servedBy,
+        status: outcome.status,
+        reason: outcome.reason,
+        ...(outcome.failedAt !== undefined ? { failedAt: outcome.failedAt } : {}),
+        attempts,
       },
-      { nodeId: client.id, traceId: origin.traceId, causedBy },
+      meta,
     );
   }
 
   // --- timeouts, timers and node lifecycle -------------------------------
 
   private onTimeout(event: SimEvent<'TIMEOUT'>): void {
-    const { nodeId, spanId } = event.payload;
-    const origin = this.origins.get(spanId);
-    if (origin && !origin.settled) {
-      origin.settled = true;
-      this.origins.delete(spanId);
-      const client = this.registry.get(origin.clientId);
-      if (client) {
-        client.state.failed += 1;
-        this.routing.onOutcome(client, origin.target, this.context.now() - origin.startedAt, false);
+    const { nodeId, requestId, workId, scope, spanId } = event.payload;
+    const caller = this.callerFor(nodeId, requestId, workId);
+    if (!caller) return;
+
+    if (scope === 'call') {
+      const call = callOf(caller);
+      // A stale timer for an attempt that already ended.
+      if (call.outboundSpan !== spanId) return;
+      call.callTimer = undefined;
+      this.onAttemptOutcome(caller, 'timeout', undefined, event.id);
+      return;
+    }
+
+    // The request's end-to-end deadline.
+    if (caller.kind === 'origin') {
+      const call = caller.origin.call;
+      if (call.outboundSpan !== undefined && call.target !== undefined) {
+        this.routing.onOutcome(caller.node, call.target, this.context.now() - call.sentAt, false);
+        this.recordBreaker(caller.node, call.target, false, event.id);
       }
-      this.emit(
-        'REQUEST_FAILED',
-        {
-          requestId: origin.requestId,
-          traceId: origin.traceId,
-          clientId: origin.clientId,
-          latency: this.context.now() - origin.startedAt,
-          status: 'timeout',
-          reason: 'timeout',
-        },
-        { nodeId: origin.clientId, traceId: origin.traceId, causedBy: event.id },
-      );
+      this.finishOrigin(caller.node, caller.origin, { ok: false, status: 'timeout', reason: 'timeout' }, event.id);
       return;
     }
 
     // An intermediate hop giving up. It stays silent: the caller holds the same
     // deadline and is abandoning the request at this very instant too.
-    const node = this.registry.get(nodeId);
-    const workId = event.payload.workId;
-    if (!node || workId === undefined) return;
-    const worker = this.workerFor(nodeId);
-    const item = worker.work.get(workId);
-    if (!item) return;
-    if (item.target !== undefined) {
-      this.routing.onOutcome(node, item.target, this.context.now() - item.dispatchedAt, false);
-    }
+    const { node, worker, item } = caller;
     node.state.failed += 1;
     this.release(node, worker, item);
   }
@@ -681,19 +925,32 @@ export class NodeRuntime {
     node.state.incarnation += 1;
     node.state.paused = false;
 
-    // Everything in memory is lost with the process. Slots and queues reset.
+    // Everything in memory is lost with the process: work, queues, in-flight
+    // calls and the circuit breakers' memory of who was failing.
     const worker = this.workerFor(node.id);
     for (const item of worker.work.values()) {
       this.context.cancel(item.timeoutEventId);
-      if (item.target !== undefined) {
-        this.routing.onOutcome(node, item.target, this.context.now() - item.dispatchedAt, false);
+      this.cancelCallTimers(item.call);
+      if (item.call.outboundSpan !== undefined && item.call.target !== undefined) {
+        this.routing.onOutcome(node, item.call.target, this.context.now() - item.call.sentAt, false);
       }
     }
     worker.work.clear();
     worker.outbound.clear();
     worker.waiting.length = 0;
+    worker.active.clear();
+    worker.queued.clear();
     node.state.inFlight = 0;
     node.state.queueDepth = 0;
+    for (const key of [...this.breakers.keys()]) if (key.startsWith(`${node.id}|`)) this.breakers.delete(key);
+    // A crashed client abandons its requests; nobody is left to report them.
+    for (const origin of [...this.origins.values()]) {
+      if (origin.clientId !== node.id) continue;
+      this.context.cancel(origin.timeoutEventId);
+      this.cancelCallTimers(origin.call);
+      if (origin.call.outboundSpan !== undefined) this.originByOutbound.delete(origin.call.outboundSpan);
+      this.origins.delete(origin.requestId);
+    }
 
     for (const module of this.modules) module.onNodeFailed(node, event);
   }
@@ -703,6 +960,66 @@ export class NodeRuntime {
     if (!node || node.state.status !== 'failed') return;
     this.registry.setStatus(node.id, 'healthy', this.context.now());
     for (const module of this.modules) module.onNodeRecovered(node, event);
+  }
+
+  // --- circuit breakers ---------------------------------------------------
+
+  private breakerAllows(node: SimNode, target: NodeId): boolean {
+    const policy = breakerPolicyOf(node.config);
+    if (!policy) return true;
+    return wouldPermit(policy, this.breakers.get(`${node.id}|${target}`) ?? CLOSED, this.context.now());
+  }
+
+  /** Counts the call against the target's circuit; true when it is a half-open probe. */
+  private admitThroughBreaker(node: SimNode, target: NodeId, causedBy: EventId | undefined): boolean {
+    const policy = breakerPolicyOf(node.config);
+    if (!policy) return false;
+    const key = `${node.id}|${target}`;
+    const before = this.breakers.get(key) ?? CLOSED;
+    const result = permit(policy, before, this.context.now());
+    this.breakers.set(key, result.state);
+    if (result.transition) this.emitBreaker(node, target, result.transition, policy, causedBy);
+    return result.state.mode === 'half_open';
+  }
+
+  private recordBreaker(node: SimNode, target: NodeId, ok: boolean, causedBy: EventId | undefined): void {
+    const policy = breakerPolicyOf(node.config);
+    if (!policy) return;
+    const key = `${node.id}|${target}`;
+    const result = record(policy, this.breakers.get(key) ?? CLOSED, this.context.now(), ok);
+    this.breakers.set(key, result.state);
+    if (result.transition) this.emitBreaker(node, target, result.transition, policy, causedBy);
+  }
+
+  private emitBreaker(
+    node: SimNode,
+    target: NodeId,
+    transition: BreakerTransition,
+    policy: BreakerPolicy,
+    causedBy: EventId | undefined,
+  ): void {
+    const meta = { nodeId: node.id, ...(causedBy !== undefined ? { causedBy } : {}) };
+    switch (transition.kind) {
+      case 'opened':
+        this.emit(
+          'CIRCUIT_OPENED',
+          {
+            nodeId: node.id,
+            target,
+            failures: transition.failures,
+            ...(transition.calls !== undefined ? { calls: transition.calls } : {}),
+            reopened: transition.reopened,
+            cooldownMs: policy.cooldownMs,
+          },
+          meta,
+        );
+        return;
+      case 'half_opened':
+        this.emit('CIRCUIT_HALF_OPENED', { nodeId: node.id, target, openForMs: transition.openForMs }, meta);
+        return;
+      case 'closed':
+        this.emit('CIRCUIT_CLOSED', { nodeId: node.id, target }, meta);
+    }
   }
 
   // --- helpers ------------------------------------------------------------
@@ -741,25 +1058,50 @@ export class NodeRuntime {
     if (item.startedAt >= 0) {
       node.state.inFlight = Math.max(0, node.state.inFlight - 1);
       node.state.busyTime += this.context.now() - item.startedAt;
+      if (item.bulkhead) worker.active.set(item.bulkhead, Math.max(0, (worker.active.get(item.bulkhead) ?? 0) - 1));
     } else {
       const index = worker.waiting.indexOf(item);
       if (index >= 0) {
         worker.waiting.splice(index, 1);
         node.state.queueDepth = Math.max(0, node.state.queueDepth - 1);
+        if (item.bulkhead) worker.queued.set(item.bulkhead, Math.max(0, (worker.queued.get(item.bulkhead) ?? 0) - 1));
       }
     }
+    // Abandoning work that is still waiting on a downstream call: that call's
+    // outcome will never be seen, so close it out for routing and the breaker.
+    const call = item.call;
+    if (call.outboundSpan !== undefined && call.target !== undefined) {
+      this.routing.onOutcome(node, call.target, this.context.now() - call.sentAt, false);
+      if (call.probe) {
+        const key = `${node.id}|${call.target}`;
+        this.breakers.set(key, releaseProbe(this.breakers.get(key) ?? CLOSED));
+      }
+      worker.outbound.delete(call.outboundSpan);
+      call.outboundSpan = undefined;
+    }
+    this.cancelCallTimers(call);
     this.context.cancel(item.timeoutEventId);
     worker.work.delete(item.workId);
-    if (item.outboundSpan) worker.outbound.delete(item.outboundSpan);
     this.pump(node, worker);
   }
 
+  /** Starts waiting work while slots allow — the first item whose class has room, not just the head of the queue. */
   private pump(node: SimNode, worker: NodeWorker): void {
     while (node.state.inFlight < node.config.concurrency && worker.waiting.length > 0) {
-      const next = worker.waiting.shift() as WorkItem;
+      const index = worker.waiting.findIndex((item) => this.hasSlot(node, worker, bulkheadNamed(node.config, item.bulkhead)));
+      if (index < 0) return;
+      const [next] = worker.waiting.splice(index, 1) as [WorkItem];
       node.state.queueDepth = Math.max(0, node.state.queueDepth - 1);
-      this.startProcessing(node, next, next.timeoutEventId);
+      if (next.bulkhead) worker.queued.set(next.bulkhead, Math.max(0, (worker.queued.get(next.bulkhead) ?? 0) - 1));
+      this.startProcessing(node, worker, next, next.timeoutEventId);
     }
+  }
+
+  private cancelCallTimers(call: Call): void {
+    if (call.callTimer !== undefined) this.context.cancel(call.callTimer);
+    if (call.retryTimer !== undefined) this.context.cancel(call.retryTimer);
+    call.callTimer = undefined;
+    call.retryTimer = undefined;
   }
 
   /**
@@ -770,13 +1112,15 @@ export class NodeRuntime {
    * pool is down must report failure rather than answer on its behalf.
    */
   private route(node: SimNode, body: RequestBody): RouteOutcome {
-    // The node a request arrived from is never a valid next hop.
+    // Requests follow the direction links are drawn, never back upstream, and
+    // never to a client — clients originate traffic, they do not serve it. A
+    // node already on the path is skipped so cycles cannot loop forever.
     const configured = this.network.topology
-      .neighboursOf(node.id)
-      .filter((id) => !body.path.includes(id));
+      .targetsOf(node.id)
+      .filter((id) => !body.path.includes(id) && this.registry.get(id)?.type !== 'client');
     if (configured.length === 0) return { kind: 'terminal' };
 
-    const reachable = new Set(this.network.topology.downstreamOf(node.id));
+    const reachable = new Set(this.network.topology.enabledTargetsOf(node.id));
     const excluded: RoutingExclusionView[] = [];
     const healthy: SimNode[] = [];
     for (const id of configured) {
@@ -786,39 +1130,37 @@ export class NodeRuntime {
       else if (!reachable.has(id)) excluded.push({ id, reason: 'link_down' });
       else healthy.push(candidate);
     }
-    const candidates = this.data.filterCandidates(node, body, healthy);
-    if (candidates.length !== healthy.length) {
-      const kept = new Set(candidates.map((c) => c.id));
+    const eligible = this.data.filterCandidates(node, body, healthy);
+    if (eligible.length !== healthy.length) {
+      const kept = new Set(eligible.map((c) => c.id));
       for (const candidate of healthy) if (!kept.has(candidate.id)) excluded.push({ id: candidate.id, reason: 'ineligible' });
     }
-    if (candidates.length === 0) return { kind: 'unreachable' };
+    if (eligible.length === 0) return { kind: 'unreachable' };
+
+    // Open circuits take a target out of consideration until it may be probed.
+    const candidates = eligible.filter((c) => this.breakerAllows(node, c.id));
+    if (candidates.length === 0) return { kind: 'circuit_open', targets: eligible.map((c) => c.id) };
 
     const target = this.routing.select(node, body, candidates, excluded);
     return target ? { kind: 'forward', target } : { kind: 'unreachable' };
   }
 
-  private scheduleTimeout(
-    nodeId: NodeId,
-    requestId: RequestId,
-    spanId: SpanId,
-    deadlineAt: SimTime,
-    waitedFor?: NodeId,
-    workId?: MessageId,
-  ): EventId {
+  private callerFor(nodeId: NodeId, requestId: RequestId, workId: MessageId | undefined): Caller | undefined {
+    const node = this.registry.get(nodeId);
+    if (!node) return undefined;
+    if (workId !== undefined) {
+      const worker = this.workerFor(nodeId);
+      const item = worker.work.get(workId);
+      return item ? { kind: 'work', node, worker, item } : undefined;
+    }
+    const origin = this.origins.get(requestId);
+    return origin && origin.clientId === nodeId ? { kind: 'origin', node, origin } : undefined;
+  }
+
+  private scheduleTimeout(payload: EventPayloadMap['TIMEOUT']): EventId {
     return this.context.scheduleAt(
-      {
-        type: 'TIMEOUT',
-        payload: {
-          nodeId,
-          requestId,
-          spanId,
-          ...(workId !== undefined ? { workId } : {}),
-          deadlineAt,
-          ...(waitedFor !== undefined ? { waitedFor } : {}),
-        },
-        nodeId,
-      },
-      Math.max(this.context.now(), deadlineAt),
+      { type: 'TIMEOUT', payload, nodeId: payload.nodeId },
+      Math.max(this.context.now(), payload.deadlineAt),
     ).id;
   }
 
@@ -851,10 +1193,13 @@ export class NodeRuntime {
       workers: [...this.workers.entries()].map(([nodeId, worker]) => ({
         nodeId,
         waiting: worker.waiting.map((item) => item.workId),
-        work: [...worker.work.values()].map((item) => ({ ...item })),
+        work: [...worker.work.values()].map((item) => ({ ...item, call: { ...item.call } })),
         outbound: [...worker.outbound.entries()],
+        active: [...worker.active.entries()],
+        queued: [...worker.queued.entries()],
       })),
-      origins: [...this.origins.entries()].map(([span, origin]) => [span, { ...origin }] as const),
+      origins: [...this.origins.values()].map((origin) => ({ ...origin, call: { ...origin.call } })),
+      breakers: [...this.breakers.entries()].map(([key, state]) => [key, { ...state, outcomes: [...state.outcomes] }] as const),
     };
   }
 
@@ -862,45 +1207,100 @@ export class NodeRuntime {
     this.workers = new Map();
     for (const saved of state.workers) {
       const worker = new NodeWorker();
-      for (const item of saved.work) worker.work.set(item.workId, { ...item });
+      for (const item of saved.work) worker.work.set(item.workId, { ...item, call: { ...item.call } });
       // Waiting entries must be the same objects as in `work`: release() finds them by identity.
       for (const workId of saved.waiting) {
         const item = worker.work.get(workId);
         if (item) worker.waiting.push(item);
       }
-      for (const [outbound, inbound] of saved.outbound) worker.outbound.set(outbound, inbound);
+      for (const [outbound, workId] of saved.outbound) worker.outbound.set(outbound, workId);
+      for (const [name, count] of saved.active) worker.active.set(name, count);
+      for (const [name, count] of saved.queued) worker.queued.set(name, count);
       this.workers.set(saved.nodeId, worker);
     }
-    this.origins = new Map(state.origins.map(([span, origin]) => [span, { ...origin }]));
-  }
-
-  /** Read-only views for inspection: what each node is holding right now. */
-  inspect(nodeId: NodeId): { waiting: number; working: number; awaiting: number; deferred: number } {
-    const worker = this.workers.get(nodeId);
-    if (!worker) return { waiting: 0, working: 0, awaiting: 0, deferred: 0 };
-    let working = 0;
-    let awaiting = 0;
-    let deferred = 0;
-    for (const item of worker.work.values()) {
-      if (item.state === 'processing') working += 1;
-      else if (item.state === 'awaiting_downstream') awaiting += 1;
-      else if (item.state === 'deferred') deferred += 1;
+    this.origins = new Map(state.origins.map((origin) => [origin.requestId, { ...origin, call: { ...origin.call } }]));
+    this.originByOutbound = new Map();
+    for (const origin of this.origins.values()) {
+      if (origin.call.outboundSpan !== undefined) this.originByOutbound.set(origin.call.outboundSpan, origin.requestId);
     }
-    return { waiting: worker.waiting.length, working, awaiting, deferred };
+    this.breakers = new Map(state.breakers.map(([key, s]) => [key, { ...s, outcomes: [...s.outcomes] }]));
   }
 
-  /** Messages a module wants answered on the normal request path are rare; this keeps the type public. */
+  /** Read-only view for inspection: what each node is holding right now. */
+  inspect(nodeId: NodeId): { waiting: number; working: number; calling: number; retrying: number; deferred: number } {
+    const worker = this.workers.get(nodeId);
+    const counts = { waiting: 0, working: 0, calling: 0, retrying: 0, deferred: 0 };
+    if (!worker) return counts;
+    counts.waiting = worker.waiting.length;
+    for (const item of worker.work.values()) {
+      if (item.state === 'processing') counts.working += 1;
+      else if (item.state === 'calling') counts.calling += 1;
+      else if (item.state === 'retry_wait') counts.retrying += 1;
+      else if (item.state === 'deferred') counts.deferred += 1;
+    }
+    return counts;
+  }
+
+  /** Current circuit state from `node` to `target`, for the UI. */
+  circuit(node: NodeId, target: NodeId): BreakerState['mode'] {
+    return (this.breakers.get(`${node}|${target}`) ?? CLOSED).mode;
+  }
+
   static isRequest(message: Message): message is RequestMessage {
     return message.kind === 'REQUEST';
   }
 }
 
-type RouteOutcome =
-  /** Nothing is wired downstream; this node serves the request itself. */
-  | { kind: 'terminal' }
-  /** A downstream tier exists but none of it is usable right now. */
-  | { kind: 'unreachable' }
-  | { kind: 'forward'; target: SimNode };
+function newCall(): Call {
+  return {
+    attempt: 0,
+    outboundSpan: undefined,
+    target: undefined,
+    sentAt: 0,
+    callTimer: undefined,
+    retryTimer: undefined,
+    lastDelay: undefined,
+    probe: false,
+  };
+}
+
+function callOf(caller: Caller): Call {
+  return caller.kind === 'origin' ? caller.origin.call : caller.item.call;
+}
+
+function bodyOf(caller: Caller): RequestBody {
+  return caller.kind === 'origin' ? caller.origin.body : caller.item.inbound.payload;
+}
+
+function requestIdOf(caller: Caller): RequestId {
+  return caller.kind === 'origin' ? caller.origin.requestId : caller.item.inbound.requestId;
+}
+
+function traceIdOf(caller: Caller): TraceId {
+  return caller.kind === 'origin' ? caller.origin.traceId : caller.item.inbound.traceId;
+}
+
+function bulkheadFor(config: NodeConfig, workloadId: string | undefined): BulkheadPolicy | undefined {
+  if (!config.bulkheads || workloadId === undefined) return undefined;
+  return config.bulkheads.find((b) => b.workloads.includes(workloadId));
+}
+
+function bulkheadNamed(config: NodeConfig, name: string | undefined): BulkheadPolicy | undefined {
+  return name === undefined ? undefined : config.bulkheads?.find((b) => b.name === name);
+}
+
+function breakerPolicyOf(config: NodeConfig): BreakerPolicy | undefined {
+  const policy = config.circuitBreaker;
+  if (!policy) return undefined;
+  return {
+    failureThreshold: policy.failureThreshold,
+    cooldownMs: policy.cooldownMs,
+    halfOpenMaxCalls: policy.halfOpenMaxCalls ?? 1,
+    ...(policy.failureRateThreshold !== undefined ? { failureRateThreshold: policy.failureRateThreshold } : {}),
+    ...(policy.windowMs !== undefined ? { windowMs: policy.windowMs } : {}),
+    minimumRequests: policy.minimumRequests ?? policy.failureThreshold,
+  };
+}
 
 function failureReasonFor(status: ResponseStatus): RequestFailureReason {
   switch (status) {

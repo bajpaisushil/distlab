@@ -78,6 +78,25 @@ export class Topology {
     return this.outgoingFrom(from).map((link) => (link.from === from ? link.to : link.from));
   }
 
+  /**
+   * Where a node may send *requests*: the far end of every link drawn from it,
+   * enabled or not, in link-id order. Requests follow the direction a link is
+   * drawn; `bidirectional` lets responses and protocol traffic come back over
+   * it, but never makes the upstream side a place to route work to.
+   */
+  targetsOf(from: NodeId): NodeId[] {
+    return this.outgoingFrom(from)
+      .filter((link) => link.from === from)
+      .map((link) => link.to);
+  }
+
+  /** `targetsOf`, restricted to links that are currently up. */
+  enabledTargetsOf(from: NodeId): NodeId[] {
+    return this.outgoingFrom(from)
+      .filter((link) => link.from === from && link.enabled)
+      .map((link) => link.to);
+  }
+
   /** Nodes reachable in one hop over an enabled link. */
   downstreamOf(from: NodeId): NodeId[] {
     return this.outgoingFrom(from)
