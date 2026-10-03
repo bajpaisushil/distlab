@@ -42,5 +42,10 @@ export function nodeBadges(node: NodeSpec, modules: ModuleTelemetry | undefined)
       badges.push({ label: `hit ${Math.round(cache.hitRatio * 100)}%`, tone: cache.hitRatio > 0.8 ? 'good' : 'warning' });
     }
   }
+  for (const queue of modules?.queues.queues ?? []) {
+    if (queue.queueId !== node.id) continue;
+    if (queue.deadLettered > 0) badges.push({ label: `${queue.deadLettered} dead`, tone: 'critical' });
+    if (queue.rejected > 0) badges.push({ label: `${queue.rejected} refused`, tone: 'warning' });
+  }
   return badges;
 }

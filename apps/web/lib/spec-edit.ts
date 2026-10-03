@@ -86,6 +86,11 @@ export function addNode(
       next.links = [...spec.links, { id: uniqueId(linkIdFor(primary.id, id), spec.links.map(linkId)), from: primary.id, to: id, latency: 10 }];
     }
   }
+  // A worker consumes something: link it to the first queue so it gets deliveries.
+  if (type === 'worker') {
+    const queue = spec.nodes.find((n) => n.type === 'queue');
+    if (queue) next.links = [...(next.links ?? spec.links), { id: uniqueId(linkIdFor(queue.id, id), spec.links.map(linkId)), from: queue.id, to: id, latency: 2 }];
+  }
   // A client with nothing to send is inert; give it a modest default workload.
   if (type === 'client') {
     next.workloads = [

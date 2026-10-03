@@ -164,6 +164,23 @@ describe('each scenario shows what it says it shows', () => {
     expect(world.snapshot().modules.data.versionRegressions).toBeGreaterThan(5);
   });
 
+  it('queue-overload: depth climbs, then the producer is refused', () => {
+    const world = run('queue-overload');
+    const queue = world.snapshot().modules.queues.queues[0]!;
+    expect(Math.max(...queue.depth.map((p) => p.value))).toBeGreaterThan(150);
+    expect(queue.rejected).toBeGreaterThan(50);
+    expect(world.simulation.log.byType('QUEUE_REJECTED').every((e) => e.at > 2000)).toBe(true);
+  });
+
+  it('dead-letter-queue: poison messages end up dead-lettered after three attempts', () => {
+    const world = run('dead-letter-queue');
+    const dead = world.simulation.log.byType('QUEUE_DEAD_LETTERED');
+    expect(dead.length).toBeGreaterThan(10);
+    expect(dead.every((e) => e.payload.attempts === 3)).toBe(true);
+    const dlq = world.snapshot().modules.queues.queues.find((q) => q.queueId === 'dlq')!;
+    expect(dlq.enqueued).toBe(dead.length - (dead.filter((e) => e.at > 14_990).length));
+  });
+
   it('thundering-herd: each expiry of the hot key stampedes the database', () => {
     const world = run('thundering-herd');
     const misses = world.simulation.log.byType('CACHE_MISS').filter((e) => e.payload.key === 'key-0' && e.payload.reason === 'expired');

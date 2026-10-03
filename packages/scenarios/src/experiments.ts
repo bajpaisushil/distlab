@@ -64,6 +64,9 @@ const NODE_FIELDS = new Set([
   'replication',
   'idempotentWrites',
   'cache',
+  // queues
+  'queue',
+  'consumer',
 ]);
 
 const LINK_FIELDS = new Set([

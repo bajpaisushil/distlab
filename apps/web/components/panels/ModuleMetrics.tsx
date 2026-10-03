@@ -3,6 +3,7 @@
 import { RoutingMetrics } from '@/components/modules/RoutingMetrics';
 import { ReliabilityMetrics } from '@/components/modules/ReliabilityMetrics';
 import { DataMetrics } from '@/components/modules/DataMetrics';
+import { QueueMetrics } from '@/components/modules/QueueMetrics';
 
 /**
  * Subsystem sections of the metrics panel. Each renders its own telemetry
@@ -14,6 +15,7 @@ export function ModuleMetrics() {
       <RoutingMetrics />
       <ReliabilityMetrics />
       <DataMetrics />
+      <QueueMetrics />
     </>
   );
 }

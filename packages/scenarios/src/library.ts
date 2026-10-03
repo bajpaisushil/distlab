@@ -497,6 +497,81 @@ export const SCENARIOS: readonly Scenario[] = [
     ],
     observe: ['the sawtooth in the database’s queue', 'p99 spiking every 2s', 'the cache hit ratio dipping at each expiry'],
   }),
+  scenario({
+    id: 'queue-overload',
+    name: 'Queue overload',
+    description:
+      'Orders arrive faster than two workers can process them. The queue absorbs the difference — for a while. Depth climbs, every order waits longer, and once the queue is full the producer starts getting refusals.',
+    category: 'Messaging',
+    difficulty: 'intro',
+    seed: 'queue-overload',
+    durationMs: 20_000,
+    nodes: [
+      { id: 'shop', type: 'client', label: 'Shop (producer)' },
+      { id: 'orders', type: 'queue', label: 'Orders queue', config: { queue: { capacity: 200, visibilityTimeoutMs: 5000 } } },
+      { id: 'worker-1', type: 'worker', label: 'Worker 1', config: { processing: { kind: 'exponential', mean: 80 }, concurrency: 2 } },
+      { id: 'worker-2', type: 'worker', label: 'Worker 2', config: { processing: { kind: 'exponential', mean: 80 }, concurrency: 2 } },
+    ],
+    links: [
+      { from: 'shop', to: 'orders', latency: 5 },
+      { from: 'orders', to: 'worker-1', latency: 2 },
+      { from: 'orders', to: 'worker-2', latency: 2 },
+    ],
+    layout: { shop: { x: 0, y: 0 }, orders: { x: 300, y: 0 }, 'worker-1': { x: 600, y: -90 }, 'worker-2': { x: 600, y: 90 } },
+    workloads: [
+      { id: 'orders', clientId: 'shop', operation: 'ENQUEUE', arrival: { kind: 'poisson', ratePerSec: 40 }, deadlineMs: 1000, stopAt: 2000 },
+      { id: 'sale', clientId: 'shop', operation: 'ENQUEUE', arrival: { kind: 'poisson', ratePerSec: 75 }, deadlineMs: 1000, startAt: 2000, stopAt: 14_000 },
+    ],
+    learningObjectives: [
+      'A queue decouples producers from consumers: producers get an instant acknowledgement however slow processing is.',
+      'If arrivals outpace consumers, depth grows without bound — and so does the time every item waits.',
+      'A bounded queue turns overload into refusals the producer can see (backpressure) instead of unbounded delay.',
+      'Adding consumers raises throughput; try a third worker and watch the depth fall.',
+    ],
+    observe: ['queue depth climbing during the sale', 'consumer lag growing with it', 'refusals once 200 items are held'],
+  }),
+  scenario({
+    id: 'dead-letter-queue',
+    name: 'Dead-letter queue',
+    description:
+      'One in twenty messages is malformed and can never be processed. Each fails, is redelivered, and fails again — until, after three attempts, it is moved to a dead-letter queue so it stops consuming worker time.',
+    category: 'Messaging',
+    difficulty: 'intermediate',
+    seed: 'dead-letter-queue',
+    durationMs: 15_000,
+    nodes: [
+      { id: 'producer', type: 'client', label: 'Producer' },
+      {
+        id: 'jobs',
+        type: 'queue',
+        label: 'Jobs queue',
+        config: { queue: { capacity: 500, maxDeliveries: 3, visibilityTimeoutMs: 2000, redeliveryDelayMs: 200, poisonRate: 0.05, deadLetterQueue: 'dlq' } },
+      },
+      { id: 'worker-1', type: 'worker', label: 'Worker 1', config: { processing: 40, concurrency: 2 } },
+      { id: 'worker-2', type: 'worker', label: 'Worker 2', config: { processing: 40, concurrency: 2 } },
+      { id: 'dlq', type: 'queue', label: 'Dead letters', config: { queue: { capacity: 10_000 } } },
+    ],
+    links: [
+      { from: 'producer', to: 'jobs', latency: 5 },
+      { from: 'jobs', to: 'worker-1', latency: 2 },
+      { from: 'jobs', to: 'worker-2', latency: 2 },
+      { from: 'jobs', to: 'dlq', latency: 2 },
+    ],
+    layout: {
+      producer: { x: 0, y: 0 },
+      jobs: { x: 300, y: 0 },
+      'worker-1': { x: 600, y: -110 },
+      'worker-2': { x: 600, y: 40 },
+      dlq: { x: 600, y: 200 },
+    },
+    workloads: [{ id: 'jobs', clientId: 'producer', operation: 'ENQUEUE', arrival: { kind: 'poisson', ratePerSec: 60 }, deadlineMs: 1000 }],
+    learningObjectives: [
+      'A poison message fails every time; without a limit it would be retried forever and waste capacity.',
+      'Bounded redelivery plus a dead-letter queue isolates bad messages for inspection without blocking good ones.',
+      'Redelivery is how at-least-once delivery recovers from worker crashes — the same mechanism that causes duplicates.',
+    ],
+    observe: ['QUEUE_DEAD_LETTERED events, each after exactly 3 attempts', 'the dead-letter queue’s depth', 'redeliveries in Metrics'],
+  }),
 ];
 
 export function findScenario(id: string): Scenario | undefined {
