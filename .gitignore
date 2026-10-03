@@ -9,3 +9,5 @@ coverage/
 .env*
 .vercel
 .claude/
+test-results/
+playwright-report/

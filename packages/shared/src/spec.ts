@@ -96,6 +96,8 @@ export interface SimulationSpec {
   partitions?: PartitionSpec[];
   /** Faults scheduled to happen partway through the run. */
   faults?: FaultSpec[];
+  /** Canvas positions. Presentation only — the engine never reads it. */
+  layout?: Record<NodeId, { x: number; y: number }>;
   /** What a learner should come away understanding. */
   learningObjectives?: string[];
   /** Things worth watching while it runs. */

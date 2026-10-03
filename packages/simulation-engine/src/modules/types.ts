@@ -5,6 +5,7 @@ import type {
   EventType,
   LatencySpec,
   Message,
+  MessageId,
   MessageKind,
   NodeId,
   NodeType,
@@ -75,7 +76,7 @@ export interface ModuleServices {
    */
   completeDeferred(
     nodeId: NodeId,
-    spanId: SpanId,
+    workId: MessageId,
     status: ResponseStatus,
     data?: ResponseData,
     causedBy?: EventId,
@@ -117,8 +118,10 @@ export interface ServeRequest {
   readonly node: SimNode;
   readonly message: RequestMessage;
   readonly body: RequestBody;
-  /** The node's server-side span for this request; the key for `completeDeferred`. */
+  /** The node's server-side span for this request. */
   readonly spanId: SpanId;
+  /** This delivery of the request — the key for `completeDeferred`. Distinct per duplicate copy. */
+  readonly workId: MessageId;
   /** How long local processing took, already elapsed. */
   readonly serviceTime: number;
   readonly causedBy: EventId;

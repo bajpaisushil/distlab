@@ -7,15 +7,18 @@ const pkg = (name: string) =>
 export default defineConfig({
   resolve: {
     alias: {
+      '@/': fileURLToPath(new URL('./apps/web/', import.meta.url)),
       '@distlab/shared': pkg('shared'),
       '@distlab/algorithms': pkg('algorithms'),
+      '@distlab/ai': pkg('ai'),
+      '@distlab/scenarios': pkg('scenarios'),
       '@distlab/network': pkg('network'),
       '@distlab/telemetry': pkg('telemetry'),
       '@distlab/simulation-engine': pkg('simulation-engine'),
     },
   },
   test: {
-    include: ['packages/*/test/**/*.test.ts'],
+    include: ['packages/*/test/**/*.test.ts', 'apps/*/test/**/*.test.ts'],
     environment: 'node',
     reporters: 'default',
   },

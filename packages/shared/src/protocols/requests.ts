@@ -3,7 +3,7 @@
  * its way through the system, and the per-node policies (timeouts, retries,
  * circuit breakers, bulkheads) that shape that journey.
  */
-import type { NodeId, RequestId, SpanId, TraceId, WorkloadId } from '../ids.js';
+import type { MessageId, NodeId, RequestId, SpanId, TraceId, WorkloadId } from '../ids.js';
 import type { OperationType, ResponseStatus } from '../messages.js';
 import type { SimTime } from '../time.js';
 import type { IssueReporter, SpecValidationContext } from '../validation.js';
@@ -36,11 +36,19 @@ export interface RequestEventPayloads {
   REQUEST_ROUTED: { requestId: RequestId; from: NodeId; to: NodeId; hop: number; strategy: string };
   REQUEST_QUEUED: { requestId: RequestId; nodeId: NodeId; queueDepth: number };
   REQUEST_REJECTED: { requestId: RequestId; nodeId: NodeId; reason: RequestFailureReason; queueDepth: number };
-  REQUEST_PROCESSING_STARTED: { requestId: RequestId; nodeId: NodeId; spanId: SpanId; serviceTime: number };
+  REQUEST_PROCESSING_STARTED: {
+    requestId: RequestId;
+    nodeId: NodeId;
+    spanId: SpanId;
+    /** The delivered message being worked on — distinct for each copy of a duplicated request. */
+    workId: MessageId;
+    serviceTime: number;
+  };
   REQUEST_PROCESSING_COMPLETED: {
     requestId: RequestId;
     nodeId: NodeId;
     spanId: SpanId;
+    workId: MessageId;
     serviceTime: number;
     outcome: 'ok' | 'error';
   };
@@ -62,7 +70,15 @@ export interface RequestEventPayloads {
     failedAt?: NodeId;
   };
   /** A hop gave up: the request's deadline passed while this node held it. */
-  TIMEOUT: { nodeId: NodeId; requestId: RequestId; spanId: SpanId; deadlineAt: SimTime; waitedFor?: NodeId };
+  TIMEOUT: {
+    nodeId: NodeId;
+    requestId: RequestId;
+    spanId: SpanId;
+    /** Which delivered copy timed out at a server; absent for the client's own deadline. */
+    workId?: MessageId;
+    deadlineAt: SimTime;
+    waitedFor?: NodeId;
+  };
 }
 
 export function validateReliabilityConfig(

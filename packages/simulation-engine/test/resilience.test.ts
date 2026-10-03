@@ -228,6 +228,30 @@ describe('capacity and backpressure', () => {
 });
 
 describe('duplicate delivery', () => {
+  it('never leaks a worker slot, however many requests are duplicated', () => {
+    // Regression: work used to be keyed by span id, which a duplicate shares
+    // with its original. Both copies took a slot, one released it, and the
+    // node wedged once every slot had leaked.
+    const world = createSimulation(
+      chainScenario({
+        durationMs: 6000,
+        nodes: [
+          { id: 'client', type: 'client' },
+          { id: 'api', type: 'api', config: { processing: 12, concurrency: 4, queueCapacity: 64 } },
+        ],
+        links: [{ from: 'client', to: 'api', latency: 10, duplicateRate: 0.5 }],
+        workloads: [constantLoad(40, { deadlineMs: 2000, stopAt: 5000 })],
+      }),
+    );
+    world.run();
+    const created = world.simulation.log.byType('REQUEST_CREATED').length;
+    expect(world.simulation.log.byType('REQUEST_COMPLETED')).toHaveLength(created);
+    expect(world.registry.require('api').state.inFlight).toBe(0);
+    expect(world.registry.require('api').state.queueDepth).toBe(0);
+    const started = world.simulation.log.byType('REQUEST_PROCESSING_STARTED').length;
+    expect(started).toBeGreaterThan(created * 1.3);
+  });
+
   it("processes a duplicated request twice but settles the client view once", () => {
     const world = createSimulation(
       chainScenario({

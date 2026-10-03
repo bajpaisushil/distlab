@@ -251,6 +251,47 @@ export class TimeSeries {
 
 export type TimeSeriesState = readonly (readonly [number, number, number])[];
 
+/**
+ * Exact percentiles per time window — p99 over time, not just p99 overall.
+ * Keeps every sample, bucketed by window; memory equals the overall histogram's.
+ */
+export class WindowedHistogram {
+  private readonly windows = new Map<number, number[]>();
+
+  constructor(readonly windowMs: number) {}
+
+  record(at: SimTime, value: number): void {
+    const index = Math.floor(at / this.windowMs);
+    const bucket = this.windows.get(index);
+    if (bucket) bucket.push(value);
+    else this.windows.set(index, [value]);
+  }
+
+  percentiles(): { t: SimTime; count: number; p50: number; p95: number; p99: number }[] {
+    return [...this.windows.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([index, samples]) => {
+        const sorted = [...samples].sort((a, b) => a - b);
+        return {
+          t: index * this.windowMs,
+          count: sorted.length,
+          p50: quantile(sorted, 0.5),
+          p95: quantile(sorted, 0.95),
+          p99: quantile(sorted, 0.99),
+        };
+      });
+  }
+
+  captureState(): readonly (readonly [number, readonly number[]])[] {
+    return [...this.windows.entries()].map(([index, samples]) => [index, [...samples]] as const);
+  }
+
+  restoreState(state: readonly (readonly [number, readonly number[]])[]): void {
+    this.windows.clear();
+    for (const [index, samples] of state) this.windows.set(index, [...samples]);
+  }
+}
+
 export type TimelineValue = number | string | null;
 
 /**
@@ -344,6 +385,7 @@ export class MetricsRegistry {
   private readonly series = new Map<string, TimeSeries>();
   private readonly timelines = new Map<string, Timeline>();
   private readonly sets = new Map<string, TrackedSet>();
+  private readonly windowed = new Map<string, WindowedHistogram>();
 
   constructor(readonly windowMs = 1000) {}
 
@@ -369,6 +411,10 @@ export class MetricsRegistry {
 
   set(name: string): TrackedSet {
     return getOrCreate(this.sets, name, () => new TrackedSet());
+  }
+
+  windowedHistogram(name: string): WindowedHistogram {
+    return getOrCreate(this.windowed, name, () => new WindowedHistogram(this.windowMs));
   }
 
   histogramNames(): string[] {
@@ -402,6 +448,7 @@ export class MetricsRegistry {
       series: capture(this.series),
       timelines: capture(this.timelines),
       sets: capture(this.sets),
+      windowed: capture(this.windowed),
     };
   }
 
@@ -412,6 +459,8 @@ export class MetricsRegistry {
     this.series.clear();
     this.timelines.clear();
     this.sets.clear();
+    this.windowed.clear();
+    for (const [name, s] of state.windowed) this.windowedHistogram(name).restoreState(s);
     for (const [name, s] of state.counters) this.counter(name).restoreState(s);
     for (const [name, s] of state.gauges) this.gauge(name).restoreState(s);
     for (const [name, s] of state.histograms) this.histogram(name).restoreState(s);
@@ -428,6 +477,7 @@ export interface MetricsState {
   readonly series: readonly (readonly [string, TimeSeriesState])[];
   readonly timelines: readonly (readonly [string, TimelineState])[];
   readonly sets: readonly (readonly [string, readonly string[]])[];
+  readonly windowed: readonly (readonly [string, readonly (readonly [number, readonly number[]])[]])[];
 }
 
 function getOrCreate<T>(map: Map<string, T>, key: string, create: () => T): T {

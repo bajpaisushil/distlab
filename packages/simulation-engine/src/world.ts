@@ -248,8 +248,8 @@ export class SimulationWorld {
         ).id,
       cancelTimer: (id) => simulation.cancel(id),
       rng: (module, nodeId) => simulation.stream(`${module}:${nodeId}`),
-      completeDeferred: (nodeId, spanId, status, data, causedBy) =>
-        world.runtime.completeDeferred(nodeId, spanId, status, data, causedBy),
+      completeDeferred: (nodeId, workId, status, data, causedBy) =>
+        world.runtime.completeDeferred(nodeId, workId, status, data, causedBy),
     };
   }
 }

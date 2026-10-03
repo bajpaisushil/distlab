@@ -1,20 +1,18 @@
 import { SPEC_VERSION, type SimulationSpec } from '@distlab/shared';
 
 /**
- * The scenario the landing page runs.
- *
- * Deliberately small and fully specified: a reader can work out by hand what
- * the engine should report, which is the point of showing it at all.
+ * What the lab opens with when there is no shared link and no previous
+ * session: small enough to read at a glance, busy enough to be interesting.
  */
-export const BASELINE_SCENARIO: SimulationSpec = {
+export const STARTER_SCENARIO: SimulationSpec = {
   version: SPEC_VERSION,
-  id: 'engine-preview',
+  id: 'starter',
   name: 'Two API servers behind a balancer, one database',
   description:
     'Steady traffic through a load balancer to two API servers backed by a single database. ' +
     'The client-to-balancer link drops 2% of packets and the database link is jittery.',
-  seed: 'distlab-preview-1',
-  durationMs: 10_000,
+  seed: 'distlab-starter',
+  durationMs: 20_000,
   nodes: [
     { id: 'client', type: 'client', label: 'Client' },
     { id: 'lb', type: 'load_balancer', label: 'Load balancer', config: { processing: 1 } },
@@ -34,6 +32,14 @@ export const BASELINE_SCENARIO: SimulationSpec = {
     { from: 'api-1', to: 'db', latency: { kind: 'normal', mean: 4, stddev: 2 } },
     { from: 'api-2', to: 'db', latency: { kind: 'normal', mean: 4, stddev: 2 } },
   ],
+  layout: {
+    client: { x: 0, y: 0 },
+    lb: { x: 260, y: 0 },
+    'api-1': { x: 520, y: -90 },
+    'api-2': { x: 520, y: 90 },
+    db: { x: 780, y: 0 },
+  },
+  faults: [{ id: 'api-1-crash', kind: 'node_crash', at: 8000, nodeId: 'api-1', recoverAfter: 3000 }],
   workloads: [
     {
       id: 'browse',

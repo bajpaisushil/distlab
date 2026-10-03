@@ -8,6 +8,8 @@ const config: NextConfig = {
   transpilePackages: [
     '@distlab/shared',
     '@distlab/algorithms',
+    '@distlab/ai',
+    '@distlab/scenarios',
     '@distlab/network',
     '@distlab/telemetry',
     '@distlab/simulation-engine',

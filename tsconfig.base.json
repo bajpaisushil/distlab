@@ -37,6 +37,12 @@
       ],
       "@distlab/algorithms": [
         "packages/algorithms/src/index.ts"
+      ],
+      "@distlab/ai": [
+        "packages/ai/src/index.ts"
+      ],
+      "@distlab/scenarios": [
+        "packages/scenarios/src/index.ts"
       ]
     }
   }

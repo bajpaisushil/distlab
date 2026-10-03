@@ -15,7 +15,33 @@
       {
         "name": "next"
       }
-    ]
+    ],
+    "paths": {
+      "@/*": [
+        "apps/web/*"
+      ],
+      "@distlab/shared": [
+        "packages/shared/src/index.ts"
+      ],
+      "@distlab/network": [
+        "packages/network/src/index.ts"
+      ],
+      "@distlab/telemetry": [
+        "packages/telemetry/src/index.ts"
+      ],
+      "@distlab/simulation-engine": [
+        "packages/simulation-engine/src/index.ts"
+      ],
+      "@distlab/algorithms": [
+        "packages/algorithms/src/index.ts"
+      ],
+      "@distlab/ai": [
+        "packages/ai/src/index.ts"
+      ],
+      "@distlab/scenarios": [
+        "packages/scenarios/src/index.ts"
+      ]
+    }
   },
   "include": [
     "next-env.d.ts",

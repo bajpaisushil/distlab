@@ -4,6 +4,7 @@ import {
   type EventPayloadMap,
   type EventType,
   type Message,
+  type MessageId,
   type MessageKind,
   type NodeId,
   type NodeType,
@@ -27,8 +28,14 @@ import type { SimulatedNetwork } from '@distlab/network';
 import type { NodeRegistry } from './node-registry.js';
 import type { DataPlane, EmitMeta, Registrar, RoutingPolicy, SimModule } from './modules/types.js';
 
-/** One inbound request being handled by one node. */
+/** One delivered request being handled by one node. */
 interface WorkItem {
+  /**
+   * The delivered message's id. Keys the work: a duplicated request arrives as
+   * two messages with one span, and each copy is genuinely worked on, so the
+   * span alone cannot identify the work.
+   */
+  readonly workId: MessageId;
   /** The node's server-side span, equal to the inbound message's span id. */
   readonly spanId: SpanId;
   readonly inbound: RequestMessage;
@@ -57,10 +64,10 @@ interface OriginRecord {
 class NodeWorker {
   /** Admitted but not yet given a slot, FIFO. */
   readonly waiting: WorkItem[] = [];
-  /** Inbound span -> work. */
-  readonly work = new Map<SpanId, WorkItem>();
-  /** Outbound span -> the inbound span waiting on it. */
-  readonly outbound = new Map<SpanId, SpanId>();
+  /** Delivered message id -> work. */
+  readonly work = new Map<MessageId, WorkItem>();
+  /** Outbound span -> the work waiting on it. */
+  readonly outbound = new Map<SpanId, MessageId>();
 }
 
 export interface BeginRequestParams {
@@ -86,9 +93,9 @@ export interface NodeRuntimeOptions {
 export interface NodeRuntimeState {
   readonly workers: readonly {
     readonly nodeId: NodeId;
-    readonly waiting: readonly SpanId[];
+    readonly waiting: readonly MessageId[];
     readonly work: readonly WorkItem[];
-    readonly outbound: readonly (readonly [SpanId, SpanId])[];
+    readonly outbound: readonly (readonly [SpanId, MessageId])[];
   }[];
   readonly origins: readonly (readonly [SpanId, OriginRecord])[];
 }
@@ -239,7 +246,7 @@ export class NodeRuntime {
    */
   completeDeferred(
     nodeId: NodeId,
-    spanId: SpanId,
+    workId: MessageId,
     status: ResponseStatus,
     data?: ResponseData,
     causedBy?: EventId,
@@ -247,7 +254,7 @@ export class NodeRuntime {
     const node = this.registry.get(nodeId);
     if (!node || node.state.status === 'failed') return false;
     const worker = this.workerFor(nodeId);
-    const item = worker.work.get(spanId);
+    const item = worker.work.get(workId);
     if (!item || item.state !== 'deferred') return false;
     if (status === 'ok') node.state.processed += 1;
     else node.state.failed += 1;
@@ -361,17 +368,18 @@ export class NodeRuntime {
     const worker = this.workerFor(node.id);
     const body = message.payload;
     const item: WorkItem = {
+      workId: message.id,
       spanId: message.spanId,
       inbound: message,
       arrivedAt: this.context.now(),
       startedAt: -1,
-      timeoutEventId: this.scheduleTimeout(node.id, message.requestId, message.spanId, body.deadlineAt),
+      timeoutEventId: this.scheduleTimeout(node.id, message.requestId, message.spanId, body.deadlineAt, undefined, message.id),
       state: 'queued',
       outboundSpan: undefined,
       target: undefined,
       dispatchedAt: -1,
     };
-    worker.work.set(item.spanId, item);
+    worker.work.set(item.workId, item);
 
     if (node.state.inFlight < node.config.concurrency) {
       this.startProcessing(node, item, causedBy);
@@ -419,7 +427,7 @@ export class NodeRuntime {
 
     this.emit(
       'REQUEST_PROCESSING_STARTED',
-      { requestId: item.inbound.requestId, nodeId: node.id, spanId: item.spanId, serviceTime },
+      { requestId: item.inbound.requestId, nodeId: node.id, spanId: item.spanId, workId: item.workId, serviceTime },
       { nodeId: node.id, traceId: item.inbound.traceId, causedBy },
     );
     this.context.schedule(
@@ -429,6 +437,7 @@ export class NodeRuntime {
           requestId: item.inbound.requestId,
           nodeId: node.id,
           spanId: item.spanId,
+          workId: item.workId,
           serviceTime,
           outcome,
         },
@@ -441,11 +450,11 @@ export class NodeRuntime {
   }
 
   private onProcessingCompleted(event: SimEvent<'REQUEST_PROCESSING_COMPLETED'>): void {
-    const { nodeId, spanId, outcome, serviceTime } = event.payload;
+    const { nodeId, workId, outcome, serviceTime } = event.payload;
     const node = this.registry.get(nodeId);
     if (!node) return;
     const worker = this.workerFor(nodeId);
-    const item = worker.work.get(spanId);
+    const item = worker.work.get(workId);
     if (!item || item.state !== 'processing') return; // already timed out or abandoned
 
     const body = item.inbound.payload;
@@ -468,6 +477,7 @@ export class NodeRuntime {
       message: item.inbound,
       body,
       spanId: item.spanId,
+      workId: item.workId,
       serviceTime,
       causedBy: event.id,
     });
@@ -510,7 +520,7 @@ export class NodeRuntime {
     item.target = target.id;
     item.dispatchedAt = this.context.now();
     item.state = 'awaiting_downstream';
-    worker.outbound.set(outboundSpan, item.spanId);
+    worker.outbound.set(outboundSpan, item.workId);
 
     this.emit(
       'REQUEST_ROUTED',
@@ -543,12 +553,12 @@ export class NodeRuntime {
 
   private onResponse(node: SimNode, message: ResponseMessage, causedBy: EventId): void {
     const worker = this.workerFor(node.id);
-    const inboundSpan = worker.outbound.get(message.spanId);
+    const workId = worker.outbound.get(message.spanId);
     // No record means a duplicate or late reply to work already settled.
-    if (inboundSpan === undefined) return;
+    if (workId === undefined) return;
     worker.outbound.delete(message.spanId);
 
-    const item = worker.work.get(inboundSpan);
+    const item = worker.work.get(workId);
     if (!item) return;
 
     const ok = message.payload.status === 'ok';
@@ -640,9 +650,10 @@ export class NodeRuntime {
     // An intermediate hop giving up. It stays silent: the caller holds the same
     // deadline and is abandoning the request at this very instant too.
     const node = this.registry.get(nodeId);
-    if (!node) return;
+    const workId = event.payload.workId;
+    if (!node || workId === undefined) return;
     const worker = this.workerFor(nodeId);
-    const item = worker.work.get(spanId);
+    const item = worker.work.get(workId);
     if (!item) return;
     if (item.target !== undefined) {
       this.routing.onOutcome(node, item.target, this.context.now() - item.dispatchedAt, false);
@@ -734,7 +745,7 @@ export class NodeRuntime {
       }
     }
     this.context.cancel(item.timeoutEventId);
-    worker.work.delete(item.spanId);
+    worker.work.delete(item.workId);
     if (item.outboundSpan) worker.outbound.delete(item.outboundSpan);
     this.pump(node, worker);
   }
@@ -779,6 +790,7 @@ export class NodeRuntime {
     spanId: SpanId,
     deadlineAt: SimTime,
     waitedFor?: NodeId,
+    workId?: MessageId,
   ): EventId {
     return this.context.scheduleAt(
       {
@@ -787,6 +799,7 @@ export class NodeRuntime {
           nodeId,
           requestId,
           spanId,
+          ...(workId !== undefined ? { workId } : {}),
           deadlineAt,
           ...(waitedFor !== undefined ? { waitedFor } : {}),
         },
@@ -824,7 +837,7 @@ export class NodeRuntime {
     return {
       workers: [...this.workers.entries()].map(([nodeId, worker]) => ({
         nodeId,
-        waiting: worker.waiting.map((item) => item.spanId),
+        waiting: worker.waiting.map((item) => item.workId),
         work: [...worker.work.values()].map((item) => ({ ...item })),
         outbound: [...worker.outbound.entries()],
       })),
@@ -836,10 +849,10 @@ export class NodeRuntime {
     this.workers = new Map();
     for (const saved of state.workers) {
       const worker = new NodeWorker();
-      for (const item of saved.work) worker.work.set(item.spanId, { ...item });
+      for (const item of saved.work) worker.work.set(item.workId, { ...item });
       // Waiting entries must be the same objects as in `work`: release() finds them by identity.
-      for (const span of saved.waiting) {
-        const item = worker.work.get(span);
+      for (const workId of saved.waiting) {
+        const item = worker.work.get(workId);
         if (item) worker.waiting.push(item);
       }
       for (const [outbound, inbound] of saved.outbound) worker.outbound.set(outbound, inbound);

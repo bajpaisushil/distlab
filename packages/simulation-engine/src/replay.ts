@@ -133,6 +133,18 @@ export class ReplayController {
     this.seek(index);
   }
 
+  /**
+   * A separate world at `position`, leaving the current one untouched — for
+   * inspecting the past without moving playback.
+   */
+  peek(position: number): SimulationWorld {
+    const target = Math.max(0, Math.min(Math.floor(position), this.reachable));
+    const base = this.nearestCheckpoint(target);
+    const world = this.restore(base);
+    if (target > base) world.simulation.run({ maxEvents: target - base });
+    return world;
+  }
+
   private afterAdvance(): void {
     const log = this.world.simulation.log.all();
     if (log.length > this.furthestLog.length) this.furthestLog = log.slice();

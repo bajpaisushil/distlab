@@ -66,6 +66,11 @@ export class EventQueue {
     this.cancelled.clear();
   }
 
+  /** Visits every live pending event in no particular order — cheap, for inspection. */
+  forEachPending(visit: (event: SimEvent) => void): void {
+    for (const event of this.heap) if (this.pending.has(event.id)) visit(event);
+  }
+
   /**
    * Live events in the exact order they will be processed. For inspection and
    * tests; O(n log n), so not for the hot path.

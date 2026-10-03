@@ -49,6 +49,8 @@ export interface TelemetrySnapshot {
     readonly failed: readonly { t: SimTime; value: number }[];
     /** Mean latency of requests completing in each window. */
     readonly latency: readonly { t: SimTime; value: number }[];
+    /** Exact latency percentiles of requests completing in each window. */
+    readonly percentiles: readonly { t: SimTime; count: number; p50: number; p95: number; p99: number }[];
   };
   /** Sections contributed by each subsystem. */
   readonly modules: ModuleTelemetry;
@@ -137,6 +139,7 @@ export class TelemetryCollector {
         completed: this.metrics.timeSeries('requests.completed').ratePerSecond(),
         failed: this.metrics.timeSeries('requests.failed').ratePerSecond(),
         latency: this.metrics.timeSeries('requests.completed').meanPerWindow(),
+        percentiles: this.metrics.windowedHistogram('request.latency').percentiles(),
       },
       modules: moduleSnapshots(this.metrics, elapsedMs),
     };
@@ -167,6 +170,7 @@ export class TelemetryCollector {
         const p = (event as SimEvent<'REQUEST_COMPLETED'>).payload;
         this.metrics.counter('requests.completed').add();
         this.metrics.histogram('request.latency').record(p.latency);
+        this.metrics.windowedHistogram('request.latency').record(event.at, p.latency);
         this.metrics.histogram('request.hops').record(p.hops);
         this.metrics.timeSeries('requests.completed').record(event.at, p.latency);
         return;
