@@ -122,6 +122,23 @@ export function Canvas() {
     [screenToFlowPosition, addNode],
   );
 
+  /**
+   * Releasing a new link anywhere on another node connects to it — not just
+   * on its small handle dots, which are hard to hit. A drop that React Flow
+   * already turned into a connection is left alone.
+   */
+  const onConnectEnd = useCallback(
+    (event: MouseEvent | TouchEvent, state: { isValid: boolean | null; fromNode: { id: string } | null }) => {
+      if (state.isValid || !state.fromNode) return;
+      const point = 'changedTouches' in event ? event.changedTouches[0] : event;
+      if (!point) return;
+      const target = document.elementFromPoint(point.clientX, point.clientY)?.closest('.react-flow__node');
+      const targetId = target?.getAttribute('data-id');
+      if (targetId && targetId !== state.fromNode.id) connectNodes(state.fromNode.id, targetId);
+    },
+    [connectNodes],
+  );
+
   // Frame the whole architecture whenever a different scenario is loaded.
   useEffect(() => {
     const timer = setTimeout(() => fitView({ padding: 0.2, duration: 250 }), 60);
@@ -143,7 +160,9 @@ export function Canvas() {
         onConnect={(connection) => {
           if (connection.source && connection.target) connectNodes(connection.source, connection.target);
         }}
+        onConnectEnd={onConnectEnd}
         connectionMode={ConnectionMode.Loose}
+        connectionRadius={36}
         deleteKeyCode={null}
         multiSelectionKeyCode={null}
         minZoom={0.2}

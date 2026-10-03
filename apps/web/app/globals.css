@@ -1086,10 +1086,18 @@ kbd {
 }
 
 .react-flow__handle.sim-handle {
-  width: 9px;
-  height: 9px;
+  width: 11px;
+  height: 11px;
   background: var(--surface);
   border: 1.5px solid var(--axis);
+}
+
+/* A larger invisible grab area than the dot itself. */
+.react-flow__handle.sim-handle::after {
+  content: '';
+  position: absolute;
+  inset: -7px;
+  border-radius: 50%;
 }
 
 .react-flow__handle.sim-handle:hover {
