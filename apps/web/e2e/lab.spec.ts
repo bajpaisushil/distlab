@@ -140,3 +140,39 @@ test('shows a stale lock holder overwriting data, then fixes it with fencing', a
   await expect(page.getByTestId('comparison')).not.toContainText('p99 latency');
   expect(errors).toEqual([]);
 });
+
+test('adds a component by dragging it onto the canvas, and links it by dragging to another node', async ({ page }) => {
+  const errors = watchErrors(page);
+  await page.goto('/');
+  await expect(page.getByTestId('node-db')).toBeVisible();
+  await page.getByTestId('palette-cache').dragTo(page.getByTestId('canvas'), { targetPosition: { x: 300, y: 420 } });
+  await expect(page.getByTestId('node-cache')).toBeVisible();
+
+  const edges = page.locator('.react-flow__edge');
+  const before = await edges.count();
+  // Drag from the new node's handle and let go anywhere over the database, not just on its handle.
+  const handle = await page.getByTestId('node-cache').locator('.react-flow__handle-right').boundingBox();
+  const db = await page.getByTestId('node-db').boundingBox();
+  await page.mouse.move(handle!.x + handle!.width / 2, handle!.y + handle!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(db!.x + db!.width / 2, db!.y + db!.height / 2, { steps: 15 });
+  await page.mouse.up();
+  await expect(edges).toHaveCount(before + 1);
+  expect(errors).toEqual([]);
+});
+
+test('keeps AI off until the user sends, and shows exactly what would be sent', async ({ page }) => {
+  const external: string[] = [];
+  page.on('request', (request) => {
+    if (request.url().includes('anthropic.com')) external.push(request.url());
+  });
+  await page.goto('/');
+  await expect(page.getByTestId('node-db')).toBeVisible();
+  await page.getByTestId('tab-explain').click();
+  await page.getByTestId('copilot-open').click();
+  await expect(page.getByTestId('copilot-send')).toBeDisabled();
+  await page.getByRole('button', { name: 'Preview what will be sent' }).click();
+  await expect(page.getByTestId('copilot-preview')).toContainText('[SCENARIO] (configured)');
+  await expect(page.getByTestId('copilot-preview')).toContainText('[F1]');
+  expect(external).toEqual([]);
+});

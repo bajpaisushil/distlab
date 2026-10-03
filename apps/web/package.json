@@ -9,7 +9,11 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
+    "@distlab/ai": "*",
+    "@distlab/algorithms": "*",
     "@distlab/network": "*",
+    "@distlab/scenarios": "*",
     "@distlab/shared": "*",
     "@distlab/simulation-engine": "*",
     "@distlab/telemetry": "*",
@@ -17,10 +21,7 @@
     "next": "^15.5.27",
     "react": "19.0.0",
     "react-dom": "19.0.0",
-    "zustand": "^5.0.15",
-    "@distlab/algorithms": "*",
-    "@distlab/ai": "*",
-    "@distlab/scenarios": "*"
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
     "@types/react": "^19.0.2",

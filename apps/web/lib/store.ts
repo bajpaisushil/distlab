@@ -12,6 +12,7 @@ import {
   type SpecIssue,
   type WorkloadSpec,
 } from '@distlab/shared';
+import type { Experiment } from '@distlab/scenarios';
 import { EngineClient } from './engine/client';
 import type { Frame, Query, QueryResults } from './engine/protocol';
 import * as edit from './spec-edit';
@@ -46,6 +47,8 @@ interface LabState {
   readonly speed: number;
   readonly selection: Selection;
   readonly view: View;
+  /** An experiment handed to the What-if view to load — from the AI copilot, never run automatically. */
+  readonly pendingExperiment: Experiment | null;
   readonly bottomTab: BottomTab;
   readonly bottomOpen: boolean;
   readonly theme: Theme;
@@ -89,6 +92,9 @@ interface LabState {
   // ui
   select(selection: Selection): void;
   setView(view: View): void;
+  /** Opens the What-if view with this experiment loaded, for the user to inspect and run. */
+  proposeExperiment(experiment: Experiment): void;
+  takePendingExperiment(): Experiment | null;
   setBottomTab(tab: BottomTab): void;
   toggleBottom(open?: boolean): void;
   setTheme(theme: Theme): void;
@@ -133,6 +139,7 @@ export const useLab = create<LabState>()((set, get) => {
     speed: 1,
     selection: null,
     view: 'lab',
+    pendingExperiment: null,
     bottomTab: 'metrics',
     bottomOpen: true,
     theme: 'system',
@@ -247,6 +254,12 @@ export const useLab = create<LabState>()((set, get) => {
 
     select: (selection) => set({ selection }),
     setView: (view) => set({ view }),
+    proposeExperiment: (experiment) => set({ pendingExperiment: experiment, view: 'experiments' }),
+    takePendingExperiment() {
+      const pending = get().pendingExperiment;
+      if (pending) set({ pendingExperiment: null });
+      return pending;
+    },
     setBottomTab: (tab) => set({ bottomTab: tab, bottomOpen: true }),
     toggleBottom: (open) => set((state) => ({ bottomOpen: open ?? !state.bottomOpen })),
     setTheme(theme) {

@@ -12,6 +12,7 @@ import {
 } from '@distlab/ai';
 import { useLab } from '@/lib/store';
 import { Icon } from '@/components/ui/icons';
+import { CopilotSection } from './CopilotSection';
 
 const KIND_LABEL: Record<FactKind, string> = { measured: 'measured', configured: 'configured', derived: 'derived' };
 const KIND_TONE: Record<FactKind, string> = { measured: 'status-good', configured: 'status-neutral', derived: 'status-warning' };
@@ -19,7 +20,8 @@ const KIND_TONE: Record<FactKind, string> = { measured: 'status-good', configure
 /**
  * Plain-language explanations built only from what the simulation recorded
  * and what the scenario configured. Every fact says which it is; measured
- * facts link to the events that show them. No AI service is involved.
+ * facts link to the events that show them. No AI service is involved — the
+ * optional Claude section below is separate and off until the user sends.
  */
 export function ExplainPanel() {
   const selection = useLab((s) => s.selection);
@@ -133,6 +135,7 @@ export function ExplainPanel() {
           ) : null}
         </>
       ) : null}
+      <CopilotSection explanation={explanation} />
     </div>
   );
 }

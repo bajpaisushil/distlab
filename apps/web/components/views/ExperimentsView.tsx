@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { SimulationSpec } from '@distlab/shared';
 import { applyExperiment, describeChange, type ExperimentChange } from '@distlab/scenarios';
 import { useLab } from '@/lib/store';
@@ -143,6 +143,16 @@ export function ExperimentsView() {
   const [customField, setCustomField] = useState<'concurrency' | 'processing' | 'readLatency' | 'queueCapacity'>('concurrency');
   const [customNode, setCustomNode] = useState('');
   const [customValue, setCustomValue] = useState<number | undefined>(undefined);
+
+  const pending = useLab((s) => s.pendingExperiment);
+  useEffect(() => {
+    // An experiment proposed elsewhere (the AI copilot) arrives loaded but not run.
+    const experiment = useLab.getState().takePendingExperiment();
+    if (!experiment) return;
+    setChanges([...experiment.changes]);
+    setName(experiment.name);
+    setResult(null);
+  }, [pending]);
 
   const applied = useMemo(() => applyExperiment(spec, { name, changes }), [spec, name, changes]);
 

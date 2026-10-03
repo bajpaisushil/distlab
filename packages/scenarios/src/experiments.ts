@@ -84,6 +84,10 @@ const LINK_FIELDS = new Set([
   'enabled',
 ]);
 
+/** Node and link fields an experiment may change, for anyone describing the vocabulary (e.g. to an AI model). */
+export const EXPERIMENT_NODE_FIELDS: readonly string[] = [...NODE_FIELDS];
+export const EXPERIMENT_LINK_FIELDS: readonly string[] = [...LINK_FIELDS];
+
 /** Extra fields subsystems allow experiments to touch, registered as they are built. */
 const extraNodeFields = new Set<string>();
 
