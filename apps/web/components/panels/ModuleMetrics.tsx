@@ -1,10 +1,15 @@
 'use client';
 
+import { RoutingMetrics } from '@/components/modules/RoutingMetrics';
+
 /**
- * Subsystem sections of the metrics panel — replication lag, queue depth,
- * circuit states, elections, lock ownership. Each subsystem renders its own
- * telemetry section; nothing here is computed from anything else.
+ * Subsystem sections of the metrics panel. Each renders its own telemetry
+ * section and nothing when its subsystem is not in use.
  */
 export function ModuleMetrics() {
-  return null;
+  return (
+    <>
+      <RoutingMetrics />
+    </>
+  );
 }

@@ -45,6 +45,12 @@ const NODE_FIELDS = new Set([
   'failureProbability',
   'readLatency',
   'writeLatency',
+  // load balancing
+  'routing',
+  'weight',
+  'ewmaAlpha',
+  'ewmaTtlMs',
+  'virtualNodes',
 ]);
 
 const LINK_FIELDS = new Set([

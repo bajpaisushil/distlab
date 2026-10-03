@@ -140,7 +140,10 @@ describe('node failure', () => {
     world.run();
 
     const routed = world.simulation.log.byType('REQUEST_ROUTED').filter((e) => e.payload.from === 'lb');
-    expect(routed.filter((e) => e.at < 1000).every((e) => e.payload.to === 'api-a')).toBe(true);
+    // Round robin alternates while both are up...
+    const before = routed.filter((e) => e.at < 1000).map((e) => e.payload.to);
+    expect(before.slice(0, 4)).toEqual(['api-a', 'api-b', 'api-a', 'api-b']);
+    // ...and everything goes to the survivor once one is down.
     expect(routed.filter((e) => e.at > 1100).every((e) => e.payload.to === 'api-b')).toBe(true);
     // Traffic keeps flowing across the failure.
     expect(world.simulation.log.byType('REQUEST_COMPLETED').filter((e) => e.at > 1100).length).toBeGreaterThan(10);

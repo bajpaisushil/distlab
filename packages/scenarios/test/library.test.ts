@@ -29,6 +29,23 @@ describe('scenario library', () => {
 });
 
 describe('each scenario shows what it says it shows', () => {
+  it('load-balancing: round robin is blind to the slow server; least connections is not', () => {
+    const scenario = findScenario('load-balancing')!;
+    const share = (world: SimulationWorld) => {
+      const lb = world.snapshot().modules.routing.nodes.find((n) => n.nodeId === 'lb')!;
+      return lb.targets.find((t) => t.id === 'api-3')!.share;
+    };
+    const roundRobin = run('load-balancing');
+    expect(share(roundRobin)).toBeCloseTo(1 / 3, 2);
+
+    const spec = structuredClone(scenario.spec);
+    spec.nodes[1]!.config = { ...spec.nodes[1]!.config, routing: 'least_connections' };
+    const least = createSimulation(spec);
+    least.run();
+    expect(share(least)).toBeLessThan(0.25);
+    expect(least.snapshot().latency.p99).toBeLessThan(roundRobin.snapshot().latency.p99);
+  });
+
   it('web-service: healthy, with a tail', () => {
     const s = run('web-service').snapshot();
     expect(s.requests.successRate).toBeGreaterThan(0.995);

@@ -10,7 +10,7 @@ import { Icon } from '@/components/ui/icons';
 import { RunComparison } from './RunResults';
 
 type Preset = { label: string; question: string; changes: (ctx: PresetContext) => ExperimentChange[] | undefined };
-type PresetContext = { db?: string; firstApi?: string; duration: number };
+type PresetContext = { db?: string; firstApi?: string; balancer?: string; duration: number };
 
 const PRESETS: readonly Preset[] = [
   { label: 'Traffic doubles', question: 'What happens if traffic doubles?', changes: () => [{ kind: 'scale_traffic', factor: 2 }] },
@@ -26,6 +26,11 @@ const PRESETS: readonly Preset[] = [
       firstApi ? [{ kind: 'add_fault', fault: { kind: 'node_crash', at: Math.round(duration / 3), nodeId: firstApi } }] : undefined,
   },
   { label: 'Packet loss 20%', question: 'What happens if packet loss becomes 20%?', changes: () => [{ kind: 'set_all_links', field: 'lossRate', value: 0.2 }] },
+  {
+    label: 'Least connections',
+    question: 'What happens if the balancer routes by least connections instead?',
+    changes: ({ balancer }) => (balancer ? [{ kind: 'set_node', nodeId: balancer, field: 'routing', value: 'least_connections' }] : undefined),
+  },
   {
     label: 'Different luck',
     question: 'How much of the result is luck? Same configuration, different seed.',
@@ -46,6 +51,9 @@ export function ExperimentsView() {
   const [customValue, setCustomValue] = useState<number | undefined>(undefined);
 
   const ctx: PresetContext = {
+    ...(spec.nodes.find((n) => n.type === 'load_balancer' || n.type === 'gateway')
+      ? { balancer: spec.nodes.find((n) => n.type === 'load_balancer' || n.type === 'gateway')!.id }
+      : {}),
     ...(spec.nodes.find((n) => n.type === 'database') ? { db: spec.nodes.find((n) => n.type === 'database')!.id } : {}),
     ...(spec.nodes.find((n) => n.type === 'api' || n.type === 'service')
       ? { firstApi: spec.nodes.find((n) => n.type === 'api' || n.type === 'service')!.id }

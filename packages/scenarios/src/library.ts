@@ -45,6 +45,43 @@ const webTier = {
 
 export const SCENARIOS: readonly Scenario[] = [
   scenario({
+    id: 'load-balancing',
+    name: 'Basic load balancing',
+    description:
+      'A load balancer spreads traffic over three API servers — but API 3 runs on older hardware and is three times slower. Round robin treats them equally. Switch the balancer to least connections or latency-aware and watch API 3’s share fall.',
+    category: 'Fundamentals',
+    difficulty: 'intro',
+    seed: 'load-balancing',
+    durationMs: 15_000,
+    nodes: [
+      { id: 'client', type: 'client', label: 'Clients' },
+      { id: 'lb', type: 'load_balancer', label: 'Load balancer', config: { processing: 1, routing: 'round_robin' } },
+      { id: 'api-1', type: 'api', label: 'API 1', config: { processing: { kind: 'exponential', mean: 15 }, concurrency: 8 } },
+      { id: 'api-2', type: 'api', label: 'API 2', config: { processing: { kind: 'exponential', mean: 15 }, concurrency: 8 } },
+      { id: 'api-3', type: 'api', label: 'API 3 (old hardware)', config: { processing: { kind: 'exponential', mean: 45 }, concurrency: 8 } },
+    ],
+    links: [
+      { from: 'client', to: 'lb', latency: 5 },
+      { from: 'lb', to: 'api-1', latency: 2 },
+      { from: 'lb', to: 'api-2', latency: 2 },
+      { from: 'lb', to: 'api-3', latency: 2 },
+    ],
+    layout: {
+      client: { x: 0, y: 0 },
+      lb: { x: 260, y: 0 },
+      'api-1': { x: 540, y: -150 },
+      'api-2': { x: 540, y: 0 },
+      'api-3': { x: 540, y: 150 },
+    },
+    workloads: [{ id: 'browse', clientId: 'client', operation: 'HTTP_GET', arrival: { kind: 'poisson', ratePerSec: 300 }, deadlineMs: 1500 }],
+    learningObjectives: [
+      'Round robin gives every server the same share, so the slowest one sets the tail latency.',
+      'Least connections and latency-aware routing send less to a slow server without being told which one it is.',
+      'Weighted round robin works too — but only if you know the capacities in advance and they never change.',
+    ],
+    observe: ['the balancer’s distribution chart in Metrics', 'p99 latency', 'API 3’s utilisation compared with the others'],
+  }),
+  scenario({
     id: 'web-service',
     name: 'A web service, healthy',
     description:

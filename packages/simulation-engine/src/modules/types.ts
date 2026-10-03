@@ -10,6 +10,7 @@ import type {
   NodeId,
   NodeType,
   RequestBody,
+  RequestId,
   RequestMessage,
   ResponseData,
   ResponseMessage,
@@ -153,12 +154,32 @@ export interface DataPlane extends SimModule {
  * so stateful strategies (least connections, latency-aware) see exactly the
  * traffic the node actually sent.
  */
+export interface RoutingExclusionView {
+  readonly id: NodeId;
+  readonly reason: 'node_failed' | 'link_down' | 'ineligible';
+}
+
+export interface DispatchContext {
+  readonly requestId?: RequestId;
+  readonly traceId?: TraceId;
+  readonly causedBy?: EventId;
+}
+
 export interface RoutingPolicy {
   /** The strategy a node uses, as reported in REQUEST_ROUTED. */
   strategyName(node: SimNode): string;
-  select(node: SimNode, body: RequestBody, candidates: readonly SimNode[]): SimNode | undefined;
-  /** A request was sent from `node` to `target`. */
-  onDispatch(node: SimNode, target: NodeId): void;
+  /**
+   * Chooses among usable candidates, given in topology order. `excluded`
+   * lists configured neighbours that were not candidates, and why.
+   */
+  select(
+    node: SimNode,
+    body: RequestBody,
+    candidates: readonly SimNode[],
+    excluded?: readonly RoutingExclusionView[],
+  ): SimNode | undefined;
+  /** A request was sent from `node` to `target` — always right after its REQUEST_ROUTED. */
+  onDispatch(node: SimNode, target: NodeId, context?: DispatchContext): void;
   /** That request finished — answered, failed or abandoned. */
   onOutcome(node: SimNode, target: NodeId, latencyMs: number, ok: boolean): void;
   captureState(): unknown;

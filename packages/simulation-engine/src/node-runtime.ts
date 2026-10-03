@@ -26,7 +26,7 @@ import {
 } from '@distlab/shared';
 import type { SimulatedNetwork } from '@distlab/network';
 import type { NodeRegistry } from './node-registry.js';
-import type { DataPlane, EmitMeta, Registrar, RoutingPolicy, SimModule } from './modules/types.js';
+import type { DataPlane, EmitMeta, Registrar, RoutingExclusionView, RoutingPolicy, SimModule } from './modules/types.js';
 
 /** One delivered request being handled by one node. */
 interface WorkItem {
@@ -221,7 +221,7 @@ export class NodeRuntime {
       { requestId, from: client.id, to: target.id, hop: 0, strategy: this.routing.strategyName(client) },
       { nodeId: client.id, traceId, ...(causedBy !== undefined ? { causedBy } : {}) },
     );
-    this.routing.onDispatch(client, target.id);
+    this.routing.onDispatch(client, target.id, { requestId, traceId, ...(causedBy !== undefined ? { causedBy } : {}) });
 
     this.network.send({
       kind: 'REQUEST',
@@ -533,7 +533,11 @@ export class NodeRuntime {
       },
       { nodeId: node.id, traceId: item.inbound.traceId, causedBy },
     );
-    this.routing.onDispatch(node, target.id);
+    this.routing.onDispatch(node, target.id, {
+      requestId: item.inbound.requestId,
+      traceId: item.inbound.traceId,
+      causedBy,
+    });
 
     this.network.send({
       kind: 'REQUEST',
@@ -773,14 +777,23 @@ export class NodeRuntime {
     if (configured.length === 0) return { kind: 'terminal' };
 
     const reachable = new Set(this.network.topology.downstreamOf(node.id));
-    const healthy = configured
-      .filter((id) => reachable.has(id))
-      .map((id) => this.registry.get(id))
-      .filter((candidate): candidate is SimNode => candidate !== undefined && candidate.state.status !== 'failed');
+    const excluded: RoutingExclusionView[] = [];
+    const healthy: SimNode[] = [];
+    for (const id of configured) {
+      const candidate = this.registry.get(id);
+      if (!candidate) continue;
+      if (candidate.state.status === 'failed') excluded.push({ id, reason: 'node_failed' });
+      else if (!reachable.has(id)) excluded.push({ id, reason: 'link_down' });
+      else healthy.push(candidate);
+    }
     const candidates = this.data.filterCandidates(node, body, healthy);
+    if (candidates.length !== healthy.length) {
+      const kept = new Set(candidates.map((c) => c.id));
+      for (const candidate of healthy) if (!kept.has(candidate.id)) excluded.push({ id: candidate.id, reason: 'ineligible' });
+    }
     if (candidates.length === 0) return { kind: 'unreachable' };
 
-    const target = this.routing.select(node, body, candidates);
+    const target = this.routing.select(node, body, candidates, excluded);
     return target ? { kind: 'forward', target } : { kind: 'unreachable' };
   }
 

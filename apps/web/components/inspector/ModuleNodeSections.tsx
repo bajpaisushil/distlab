@@ -1,12 +1,16 @@
 'use client';
 
 import type { NodeSpec } from '@distlab/shared';
+import { RoutingSection } from '@/components/modules/RoutingSection';
 
 /**
- * Subsystem settings for a node — routing strategy, replication, retries and
- * timeouts, queues, consensus, locks. Each subsystem contributes the section
- * that applies to this node type.
+ * Subsystem settings for a node. Each section decides for itself whether it
+ * applies to this node, so adding a subsystem never touches the others.
  */
-export function ModuleNodeSections(_props: { node: NodeSpec }) {
-  return null;
+export function ModuleNodeSections({ node }: { node: NodeSpec }) {
+  return (
+    <>
+      <RoutingSection node={node} />
+    </>
+  );
 }
