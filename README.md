@@ -1,57 +1,157 @@
 # DistLab
 
-A deterministic simulation engine for distributed systems, running entirely in the browser.
+A deterministic, event-driven laboratory for distributed systems that runs entirely in your browser.
 
-DistLab lets you build an architecture, push traffic through it, break things, and read back
-exactly what happened — logs, metrics and traces produced by a real event-driven simulation
-rather than by animations on a diagram.
+**Live:** https://distlab.vercel.app
 
-**Status: phases 1–3 of 12.** The engine, the simulated network and the telemetry layer are
-built and tested. The visual editor, failure injection, consensus algorithms, replay and the AI
-explanation layer are not. The [development order](#development-order) below tracks what is done.
+Draw an architecture, push traffic through it, break it on purpose, and read back exactly what
+happened. Every number you see — latency percentiles, retries, stale reads, elections, lock
+hand-offs — was produced by a discrete-event simulation. Nothing is an animation of what *might*
+happen.
 
-## The one rule
+There is no backend, no account and nothing to pay for. Your scenarios stay in your browser.
 
-A scenario plus a seed reproduces a run exactly — the same events, the same timings, the same
-event ids. Everything else is built on that:
+## What you can do
+
+**Design.** Drag components onto a canvas: clients, load balancers, gateways, API servers,
+services, caches, databases and replicas, queues and workers, Raft nodes and lock services. Drag
+from one node to another to connect them. Every node, link, workload and fault is editable in the
+inspector. Undo and redo work everywhere.
+
+**Run and rewind.** Play, pause, step one event at a time, step backwards, scrub the timeline, or
+jump to any event and ask what the system looked like just before it. Change playback speed. The
+same seed always produces the same run, event for event.
+
+**Break things.** Faults are scheduled events, not visual effects, and everything after them
+emerges from the simulation:
+
+| Fault | What it does |
+|---|---|
+| Node crash | The process dies; in-memory work is lost |
+| Link down | A cable is cut; the sender can tell |
+| Network partition | Packets across the split vanish silently |
+| Latency spike | A link gets slow without going down |
+| Packet loss | A link drops a fraction of messages |
+| Packet duplication | A link delivers some messages twice |
+| Message delay | Everything to and from one host is held up |
+| Process pause | A stop-the-world freeze; the node wakes believing no time passed |
+| Overloaded node | Every unit of work takes longer |
+| Unavailable | A database or queue refuses work and fails fast |
+| Stale replica | A replica stops applying replication, then catches up |
+
+**Explore the patterns.**
+
+- *Load balancing:* first available, round robin, weighted, least connections, random,
+  latency-aware (EWMA) and consistent hashing — each decision is logged with its reason.
+- *Reliability:* per-call timeouts, retries with fixed or exponential backoff and full, equal
+  or decorrelated jitter, circuit breakers (count or failure-rate, with half-open probes),
+  bulkheads, and leader-hint redirects.
+- *Data:* asynchronous and synchronous replication, read preferences, stale-read detection,
+  in-order or naive replica apply, caches with TTL, LRU and miss coalescing, idempotent writes.
+- *Messaging:* queues with backpressure, visibility timeouts, redelivery, dead-letter queues and
+  duplicate processing.
+- *Coordination:* a Raft-like cluster (terms, randomised elections, log replication, majority
+  commit) and a lease-based lock service with fencing tokens. Both are simplified on purpose —
+  for learning, not production.
+
+**Observe.** Structured logs, metrics (throughput, p50/p95/p99, queue depth, utilisation,
+retries, timeouts, drops, replication lag, and per-subsystem panels), and a waterfall for every
+distributed trace (`traceId`, `spanId`, `parentSpanId`).
+
+**Understand.** Select an event, a trace or a failed request and the Explain tab tells you why it
+happened, built only from the events that caused it. Every fact says whether it was measured,
+configured or derived, and links to the events behind it. Interpretation is labelled as such.
+
+**Compare.** Run two architectures on the same workload and seed, or ask a what-if question
+("traffic doubles", "turn on fencing tokens", "read from the primary") against your current
+design. Differences come from the configuration, not from luck.
+
+**Share.** Export and import `distlab-scenario.json`, or copy a share link that carries the whole
+scenario in the URL. Your last session is restored from IndexedDB.
+
+## Scenario library
+
+| Category | Scenarios |
+|---|---|
+| Fundamentals | Basic load balancing · A web service, healthy |
+| Failures | Node failure · Cascading failure · Retry storm · Circuit breaker |
+| Network | Network partition · Packet loss and deadlines · Message reordering |
+| Load | Capacity saturation · Thundering herd |
+| Data | Database replication · Replica lag · Message duplication |
+| Messaging | Queue overload · Dead-letter queue |
+| Coordination | Leader election · Split brain · Distributed lock contention |
+
+Each one states what it teaches and what to watch for, and has tests asserting that it really
+shows it. For example, the retry-storm test checks that aggressive retries keep the system
+overloaded after the trigger is gone while a circuit breaker lets it recover. The lock-contention
+test checks that a frozen holder's late write is a safety violation without fencing and is refused
+with it.
+
+## Optional: ask Claude
+
+The Explain tab has an optional section that uses your own Anthropic API key. It is off until you
+press **Send**, and requests go from your browser straight to `api.anthropic.com` — DistLab has
+no server in between.
+
+- **What is sent:** a numbered evidence pack (the scenario's configuration, the simulator's own
+  facts about what you selected, and headline metrics) plus your question. The Preview button
+  shows exactly that text before anything leaves the browser.
+- **What comes back** is structured JSON, checked before you see it. Every claim must cite the
+  evidence it rests on; a number that is not in the cited evidence is flagged as unverified.
+- **It cannot change the simulation.** A suggested experiment is validated like any hand-made
+  change and opens in the What-if view for you to run. A drafted scenario is validated like an
+  imported file — with one automatic correction round — and loads only if you choose.
+
+It uses Claude Opus 5.5 by default (Sonnet 5.5 is available), with server-side refusal fallback
+enabled. The key is kept in memory unless you tick *Remember on this device*.
+
+## The one rule: determinism
+
+A scenario plus a seed reproduces a run exactly — the same events, the same timings, the same ids.
 
 - Virtual time only. The clock advances by processing events, never from `Date.now()` or a timer,
-  so a 10-second simulation finishes in about 150ms and 10,000 events cost nothing to replay.
-- Every random decision comes from a seeded generator, split into independent per-link and
-  per-node streams. Adding a link cannot change the dice another link rolls.
-- Events are totally ordered by `(timestamp, sequence)`. Ties never fall to heap layout.
-- Nodes never call each other. Every hop goes through a simulated network that may delay, drop,
-  duplicate, reorder or partition it.
+  so ten simulated seconds take milliseconds to compute.
+- Every random decision comes from a seeded generator, split into independent per-link, per-node
+  and per-module streams. Adding a link cannot change the dice another link rolls.
+- Events are totally ordered by `(timestamp, sequence)`.
+- Nodes never call each other. Every message travels through a simulated network that may delay,
+  drop, duplicate, reorder or partition it.
+- Every subsystem captures its state as plain data, so a run can be checkpointed and restored. A
+  replay-equivalence test restores each subsystem mid-run and requires the identical outcome.
 
 A [test](packages/simulation-engine/test/determinism-guard.test.ts) fails the build if
-`Math.random`, `Date.now`, `setTimeout` or `new Date` ever appear in engine code.
+`Math.random`, `Date.now`, `setTimeout` or `new Date` appear in engine code.
 
 ## Layout
 
 ```
-packages/shared              contracts: ids, virtual time, the event union and its typed
-                             payloads, message/node/link types, scenario spec + validator, RNG
-packages/network             latency, jitter, packet loss, duplication, reordering,
-                             bandwidth, link outages, partitions
-packages/telemetry           structured logs, metrics with exact percentiles, distributed traces
-packages/simulation-engine   clock, event queue, kernel, node runtime, composition root
-apps/web                     a minimal Next.js page that runs a scenario in the browser
+packages/shared              contracts: ids, virtual time, events, messages, node and link types,
+                             scenario spec + validation, faults, per-subsystem protocols, seeded RNG
+packages/network             latency, jitter, loss, duplication, reordering, bandwidth, partitions
+packages/algorithms          pure cores: load balancing, backoff, circuit breaker, replication
+                             ordering, queue delivery, Raft rules, lock table and fencing
+packages/simulation-engine   kernel, node runtime, fault injector, replay, and the subsystem
+                             modules (routing, data, queues, consensus, locks)
+packages/telemetry           logs, metrics with exact percentiles, traces, per-subsystem telemetry
+packages/scenarios           the scenario library, what-if experiments, run comparison
+packages/ai                  grounded explanations; evidence packs and answer checks for Claude
+apps/web                     Next.js app: canvas, inspector, playback, panels; the engine runs in a
+                             Web Worker
 ```
 
-`network` and `telemetry` depend only on `shared`, and reach the kernel through a `SimulationContext`
-interface. The graph is acyclic and nothing in `packages/` imports React — the engine is tested in
-Node with no browser and no DOM.
+Nothing in `packages/` imports React. The engine is tested in Node with no browser.
 
-## Try it
+## Develop
 
 ```bash
 npm install
-npm test          # 157 tests across the four packages
+npm run dev          # http://localhost:3000
+npm test             # 434 unit and simulation tests
+npm run test:e2e     # 10 Playwright tests against a production build
 npm run typecheck
-npm run dev       # http://localhost:3000
 ```
 
-## Using the engine
+## Use the engine directly
 
 ```ts
 import { createSimulation } from '@distlab/simulation-engine';
@@ -64,7 +164,8 @@ const world = createSimulation({
   durationMs: 10_000,
   nodes: [
     { id: 'client', type: 'client' },
-    { id: 'api', type: 'api', config: { processing: 18, concurrency: 8 } },
+    { id: 'api', type: 'api', config: { processing: 18, concurrency: 8, callTimeoutMs: 300,
+      retry: { maxRetries: 2, backoff: 'exponential', jitter: 'full' } } },
     { id: 'db', type: 'database', config: { readLatency: 14, concurrency: 6 } },
   ],
   links: [
@@ -75,82 +176,16 @@ const world = createSimulation({
     { id: 'browse', clientId: 'client', operation: 'HTTP_GET',
       arrival: { kind: 'poisson', ratePerSec: 120 }, deadlineMs: 800 },
   ],
+  faults: [{ kind: 'node_pause', at: 3000, nodeId: 'db', durationMs: 1500 }],
 });
 
 world.run();
-const { latency, requests } = world.snapshot();
-console.log(requests.throughputPerSec, latency.p99);
+const { latency, requests, modules } = world.snapshot();
+console.log(requests.throughputPerSec, latency.p99, modules.reliability.retries);
 ```
-
-Crash a node partway through — failures are scheduled events, not a side channel:
-
-```ts
-world.start();
-world.simulation.scheduleAt({ type: 'NODE_FAILED', payload: { nodeId: 'api', reason: 'oom' } }, 3000);
-world.run();
-```
-
-Step rather than run, which is what the UI will do:
-
-```ts
-world.step();                       // exactly one event
-world.run({ maxEvents: 500 });      // a batch, then yield
-world.simulation.runUntil((e) => e.type === 'REQUEST_FAILED');
-```
-
-## What the model does today
-
-**Nodes** hold a bounded worker pool. A request occupies a slot from admission until the node
-answers, *including* time spent waiting on a downstream call, so thread-pool exhaustion and
-backpressure emerge on their own. Arrivals that find every worker busy queue; arrivals that find
-the queue full are rejected.
-
-**Requests** carry a deadline that every hop honours. Without it a dropped message would leave a
-request pending forever and error rates would be undefined. Retries, backoff, configurable
-per-call timeouts and circuit breakers are phase 7 — this is the floor that stops the system
-leaking capacity, not the reliability stack.
-
-**Traces** are derived from message events rather than declared by nodes: a server span opens when
-a node receives a request and closes when it sends the reply, so the gap between a parent span and
-its child *is* the network time.
-
-**Metrics** are computed only from events the engine processed. There is no path for a number to
-exist that the simulation did not produce — which is the property the later AI layer depends on.
-
-## Development order
-
-| | Phase |
-|---|---|
-| ✅ | 1 · Simulation clock, event queue, deterministic RNG |
-| ✅ | 2 · Nodes, simulated network, messages |
-| ✅ | 3 · Request tracing and metrics |
-| ◻ | 4 · Architecture canvas |
-| ◻ | 5 · Failure injection |
-| ◻ | 6 · Load balancing and replication |
-| ◻ | 7 · Queues, retries, circuit breakers |
-| ◻ | 8 · Leader election and distributed locks |
-| ◻ | 9 · Time travel and replay |
-| ◻ | 10 · Scenario library |
-| ◻ | 11 · Architecture comparison and what-if experiments |
-| ◻ | 12 · AI copilot |
-
-Each phase lands with tests before the next one starts. Event types, node types and config fields
-for unbuilt phases are deliberately absent: a name in the type system with no handler behind it is
-a lie the compiler will happily tell you.
-
-### Seams already in place
-
-- `DownstreamSelector` ([routing.ts](packages/simulation-engine/src/routing.ts)) is where phase 6's
-  round-robin, weighted, least-connections and latency-aware strategies plug in. Today there is one
-  implementation, `first-available`, which makes the absence of a real strategy visible in the
-  metrics instead of hiding it behind accidental round-robin.
-- `NODE_FAILED` / `NODE_RECOVERED` are ordinary scheduled events, so phase 5's fault injector is a
-  scheduler on top of what already works.
-- The event log records every processed event with a `causedBy` chain, which is the substrate
-  phase 9's replay will rewind.
 
 ## Privacy
 
-The simulation is local. Scenarios are plain JSON you can export and import, nothing is sent
-anywhere, and the engine has no network calls of its own. When the AI layer arrives it will be
-opt-in per analysis and will receive only structured simulation state.
+The simulation runs locally. Scenarios are plain JSON; nothing is uploaded, and the app makes no
+network calls of its own. The only exception is the optional Claude section, which sends what its
+preview shows, to Anthropic, when you press Send.
