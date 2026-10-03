@@ -47,5 +47,12 @@ export function nodeBadges(node: NodeSpec, modules: ModuleTelemetry | undefined)
     if (queue.deadLettered > 0) badges.push({ label: `${queue.deadLettered} dead`, tone: 'critical' });
     if (queue.rejected > 0) badges.push({ label: `${queue.rejected} refused`, tone: 'warning' });
   }
+  for (const raft of modules?.consensus.nodes ?? []) {
+    if (raft.nodeId !== node.id) continue;
+    if (raft.stale) badges.push({ label: `stale leader t${raft.term}`, tone: 'critical' });
+    else if (raft.role === 'leader') badges.push({ label: `leader t${raft.term}`, tone: 'good' });
+    else if (raft.role === 'candidate') badges.push({ label: `candidate t${raft.term}`, tone: 'warning' });
+    else if (raft.role === 'follower' && raft.term > 0) badges.push({ label: `follower t${raft.term}` });
+  }
   return badges;
 }

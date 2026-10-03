@@ -33,7 +33,10 @@ export type JitterKind = 'none' | 'full' | 'equal' | 'decorrelated';
 
 export const BACKOFF_KINDS: readonly BackoffKind[] = ['none', 'fixed', 'exponential'];
 export const JITTER_KINDS: readonly JitterKind[] = ['none', 'full', 'equal', 'decorrelated'];
+/** Retried by default. */
 export const RETRYABLE_STATUSES: readonly ResponseStatus[] = ['error', 'timeout', 'unreachable', 'rejected', 'unavailable'];
+/** Any failure may be opted into — e.g. not_leader, to find a consensus leader by trying the next node. */
+export const RETRY_ON_STATUSES: readonly ResponseStatus[] = [...RETRYABLE_STATUSES, 'circuit_open', 'not_leader'];
 
 /** How a caller retries a failed downstream call. */
 export interface RetryPolicy {
@@ -177,6 +180,8 @@ export interface RequestEventPayloads {
     delayMs: number;
     reason: ResponseStatus;
     previousTarget: NodeId;
+    /** The previous target named the node to try instead (a `not_leader` reply's leader hint). */
+    redirectTo?: NodeId;
     workId?: MessageId;
   };
   CIRCUIT_OPENED: {
@@ -220,7 +225,7 @@ export function validateReliabilityConfig(
       }
       if (retry.retryOn !== undefined) {
         if (!Array.isArray(retry.retryOn)) push(`${at}.retryOn`, 'must be an array of statuses');
-        else retry.retryOn.forEach((status, i) => checkOneOf(status, RETRYABLE_STATUSES, `${at}.retryOn[${i}]`, push));
+        else retry.retryOn.forEach((status, i) => checkOneOf(status, RETRY_ON_STATUSES, `${at}.retryOn[${i}]`, push));
       }
     }
   }

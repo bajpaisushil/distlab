@@ -91,6 +91,19 @@ export function addNode(
     const queue = spec.nodes.find((n) => n.type === 'queue');
     if (queue) next.links = [...(next.links ?? spec.links), { id: uniqueId(linkIdFor(queue.id, id), spec.links.map(linkId)), from: queue.id, to: id, latency: 2 }];
   }
+  // A Raft node talks to every peer: link it to each existing member of the default cluster.
+  if (type === 'consensus') {
+    const peers = spec.nodes.filter((n) => n.type === 'consensus' && (n.config?.consensus?.clusterId ?? 'raft') === 'raft');
+    const taken = spec.links.map(linkId);
+    next.links = [
+      ...(next.links ?? spec.links),
+      ...peers.map((peer) => {
+        const linkKey = uniqueId(linkIdFor(peer.id, id), taken);
+        taken.push(linkKey);
+        return { id: linkKey, from: peer.id, to: id, latency: 3 };
+      }),
+    ];
+  }
   // A client with nothing to send is inert; give it a modest default workload.
   if (type === 'client') {
     next.workloads = [

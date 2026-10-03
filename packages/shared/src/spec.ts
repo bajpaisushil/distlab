@@ -264,6 +264,27 @@ export function validateSimulationSpec(input: unknown): ValidationResult {
     });
   }
 
+  // Every pair of consensus nodes in a cluster needs a link: votes and log
+  // entries travel over the network like everything else.
+  if (Array.isArray(spec.nodes)) {
+    const clusters = new Map<string, NodeId[]>();
+    for (const node of spec.nodes) {
+      if (node?.type !== 'consensus' || typeof node.id !== 'string') continue;
+      const clusterId = (node.config?.consensus?.clusterId as string | undefined) ?? 'raft';
+      clusters.set(clusterId, [...(clusters.get(clusterId) ?? []), node.id]);
+    }
+    for (const [clusterId, members] of clusters) {
+      for (let i = 0; i < members.length; i++) {
+        for (let j = i + 1; j < members.length; j++) {
+          const a = members[i]!;
+          const b = members[j]!;
+          const linked = resolvedLinks.some((l) => (l.from === a && l.to === b) || (l.from === b && l.to === a));
+          if (!linked) push('links', `consensus cluster "${clusterId}" needs a link between ${a} and ${b}`);
+        }
+      }
+    }
+  }
+
   const workloadIds = new Set<WorkloadId>();
   if (!Array.isArray(spec.workloads)) {
     push('workloads', 'must be an array');

@@ -1,4 +1,4 @@
-import { SPEC_VERSION, type SimulationSpec } from '@distlab/shared';
+import { SPEC_VERSION, type LinkSpec, type NodeSpec, type SimulationSpec, type WorkloadSpec } from '@distlab/shared';
 
 export type ScenarioCategory = 'Fundamentals' | 'Failures' | 'Network' | 'Load' | 'Data' | 'Messaging' | 'Coordination';
 
@@ -12,6 +12,55 @@ type Draft = Omit<SimulationSpec, 'version'> & { category: ScenarioCategory; dif
 
 function scenario({ category, difficulty, ...spec }: Draft): Scenario {
   return { spec: { version: SPEC_VERSION, ...spec, category }, category, difficulty };
+}
+
+/** A five-node Raft cluster in a ring layout; n1 times out first, so it wins the first election. */
+function raftCluster(): { nodes: NodeSpec[]; links: LinkSpec[]; layout: Record<string, { x: number; y: number }> } {
+  const members = ['n1', 'n2', 'n3', 'n4', 'n5'];
+  const nodes: NodeSpec[] = members.map((id, i) => ({
+    id,
+    type: 'consensus',
+    label: `Node ${i + 1}`,
+    config: { processing: 2, consensus: { electionTimeoutMs: i === 0 ? { min: 60, max: 80 } : { min: 150, max: 300 }, heartbeatIntervalMs: 40 } },
+  }));
+  const links: LinkSpec[] = [];
+  for (let i = 0; i < members.length; i++) {
+    for (let j = i + 1; j < members.length; j++) links.push({ from: members[i]!, to: members[j]!, latency: { kind: 'uniform', min: 3, max: 8 } });
+  }
+  const layout: Record<string, { x: number; y: number }> = {};
+  // Node 1 at the bottom, then clockwise: nodes 1 and 2 sit nearest the lower clients.
+  members.forEach((id, i) => {
+    const angle = Math.PI / 2 + (i / members.length) * Math.PI * 2;
+    layout[id] = { x: 780 + Math.round(Math.cos(angle) * 220), y: 30 + Math.round(Math.sin(angle) * 220) };
+  });
+  return { nodes, links, layout };
+}
+
+/** A client and a balancer that tries the next node when one says it is not the leader. */
+function raftClient(prefix: string, targets: readonly string[], rate: number, y: number) {
+  const client = `${prefix}client`;
+  const lb = `${prefix}lb`;
+  return {
+    nodes: [
+      { id: client, type: 'client', label: prefix ? `Clients ${prefix.replace('-', '').toUpperCase()}` : 'Clients' },
+      {
+        id: lb,
+        type: 'load_balancer',
+        label: prefix ? `Router ${prefix.replace('-', '').toUpperCase()}` : 'Router',
+        config: {
+          processing: 1,
+          callTimeoutMs: 250,
+          // Back off a little: during an election nobody is leader, and retrying instantly just burns attempts.
+          retry: { maxRetries: 5, backoff: 'exponential', baseDelayMs: 25, maxDelayMs: 200, jitter: 'full', retryOn: ['not_leader', 'timeout', 'unreachable'] },
+        },
+      },
+    ] as NodeSpec[],
+    links: [{ from: client, to: lb, latency: 3 }, ...targets.map((t) => ({ from: lb, to: t, latency: 3 }))] as LinkSpec[],
+    layout: { [client]: { x: 40, y }, [lb]: { x: 320, y } },
+    workloads: [
+      { id: `${prefix}writes`, clientId: client, operation: 'HTTP_POST', arrival: { kind: 'poisson', ratePerSec: rate }, deadlineMs: 1500, startAt: 300 },
+    ] as WorkloadSpec[],
+  };
 }
 
 const webTier = {
@@ -572,6 +621,70 @@ export const SCENARIOS: readonly Scenario[] = [
     ],
     observe: ['QUEUE_DEAD_LETTERED events, each after exactly 3 attempts', 'the dead-letter queue’s depth', 'redeliveries in Metrics'],
   }),
+  (() => {
+    const raft = raftCluster();
+    const clients = raftClient('', ['n1', 'n2', 'n3', 'n4', 'n5'], 40, 30);
+    return scenario({
+      id: 'leader-election',
+      name: 'Leader election',
+      description:
+        'Five nodes run a Raft-like protocol (an educational simulation, not production Raft). Node 1 leads until it crashes at 4s. The followers stop hearing heartbeats, time out at random moments, and elect a new leader in a higher term; writes stall only for the election.',
+      category: 'Coordination',
+      difficulty: 'intermediate',
+      seed: 'leader-election',
+      durationMs: 12_000,
+      nodes: [...raft.nodes, ...clients.nodes],
+      links: [...raft.links, ...clients.links],
+      layout: { ...raft.layout, ...clients.layout },
+      workloads: clients.workloads,
+      faults: [{ id: 'leader-crash', kind: 'node_crash', at: 4000, nodeId: 'n1', recoverAfter: 5000 }],
+      learningObjectives: [
+        'A leader proves it is alive with heartbeats; silence for a randomised election timeout triggers an election.',
+        'Each election starts a new term; a node votes at most once per term, so at most one leader can win it.',
+        'A write is acknowledged only after a majority holds it, so the new leader already has every acknowledged write.',
+        'A recovered old leader rejoins as a follower: it sees a higher term and defers.',
+      ],
+      observe: ['the leadership strip in Metrics', 'the term rising at the crash', 'the brief gap in completed writes during the election'],
+    });
+  })(),
+  (() => {
+    const raft = raftCluster();
+    const majority = raftClient('a-', ['n1', 'n2', 'n3', 'n4', 'n5'], 30, -130);
+    const minority = raftClient('b-', ['n1', 'n2', 'n3', 'n4', 'n5'], 20, 190);
+    return scenario({
+      id: 'split-brain',
+      name: 'Split brain',
+      description:
+        'A partition cuts the leader and one follower off from the other three, with some clients on each side. Both sides end up with a node that believes it leads — but only the side with a majority can commit anything. When the network heals, the old leader learns it was replaced and steps down.',
+      category: 'Coordination',
+      difficulty: 'advanced',
+      seed: 'split-brain',
+      durationMs: 12_000,
+      nodes: [...raft.nodes, ...majority.nodes, ...minority.nodes],
+      links: [...raft.links, ...majority.links, ...minority.links],
+      layout: { ...raft.layout, ...majority.layout, ...minority.layout },
+      workloads: [...majority.workloads, ...minority.workloads],
+      faults: [
+        {
+          id: 'split',
+          kind: 'partition',
+          at: 3000,
+          groups: [
+            ['n1', 'n2', 'b-client', 'b-lb'],
+            ['n3', 'n4', 'n5', 'a-client', 'a-lb'],
+          ],
+          healAfter: 4000,
+        },
+      ],
+      learningObjectives: [
+        'In a partition, both sides can have a node that believes it is leader — split brain, at least in belief.',
+        'Majority quorums make it harmless: the minority leader cannot get a majority to acknowledge anything, so it commits nothing and its clients’ writes time out.',
+        'Terms resolve it: on healing, the old leader sees a higher term and steps down without a fight.',
+        'Systems without quorums (or fencing) let both sides accept writes — compare the lock contention scenario.',
+      ],
+      observe: ['the “Split brain · 2 leaders” tile in Metrics', 'side B’s writes all failing during the partition', 'the STEPPED_DOWN event at 7s'],
+    });
+  })(),
 ];
 
 export function findScenario(id: string): Scenario | undefined {

@@ -11,6 +11,6 @@ export * from './modules/types.js';
 export { createRoutingPolicy } from './modules/routing.js';
 export { createDataPlane } from './modules/data.js';
 export { createQueueModule } from './modules/queue.js';
-export { createConsensusModule } from './modules/consensus.js';
+export { createConsensusModule, raftRoles } from './modules/consensus.js';
 export { createLocksModule } from './modules/locks.js';
 export * from './replay.js';

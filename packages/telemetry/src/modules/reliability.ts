@@ -38,7 +38,8 @@ export const reliabilityTelemetry: TelemetryModule<ReliabilityTelemetry> = {
     switch (event.type) {
       case 'RETRY': {
         const p = (event as SimEvent<'RETRY'>).payload;
-        return `${p.nodeId} will retry ${p.requestId} (attempt ${p.attempt}) in ${Math.round(p.delayMs)}ms after "${p.reason}" from ${p.previousTarget}`;
+        const redirect = p.redirectTo ? ` — redirected to ${p.redirectTo}, the leader ${p.previousTarget} named` : '';
+        return `${p.nodeId} will retry ${p.requestId} (attempt ${p.attempt}) in ${Math.round(p.delayMs)}ms after "${p.reason}" from ${p.previousTarget}${redirect}`;
       }
       case 'CIRCUIT_OPENED': {
         const p = (event as SimEvent<'CIRCUIT_OPENED'>).payload;

@@ -67,6 +67,8 @@ const NODE_FIELDS = new Set([
   // queues
   'queue',
   'consumer',
+  // coordination
+  'consensus',
 ]);
 
 const LINK_FIELDS = new Set([

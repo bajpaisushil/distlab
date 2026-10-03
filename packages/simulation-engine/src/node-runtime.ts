@@ -710,7 +710,9 @@ export class NodeRuntime {
       return;
     }
 
-    if (this.scheduleRetry(caller, status, target, causedBy)) return;
+    // A node that is not the leader names the one it believes is; callers follow that redirect.
+    const hint = status === 'not_leader' ? response?.payload.data?.leaderHint : undefined;
+    if (this.scheduleRetry(caller, status, target, causedBy, hint)) return;
     this.failCall(caller, status, response, causedBy);
   }
 
@@ -749,7 +751,13 @@ export class NodeRuntime {
     call.outboundSpan = undefined;
   }
 
-  private scheduleRetry(caller: Caller, status: ResponseStatus, previousTarget: NodeId, causedBy: EventId): boolean {
+  private scheduleRetry(
+    caller: Caller,
+    status: ResponseStatus,
+    previousTarget: NodeId,
+    causedBy: EventId,
+    redirectTo: NodeId | undefined,
+  ): boolean {
     const policy = caller.node.config.retry;
     if (!policy) return false;
     const call = callOf(caller);
@@ -785,6 +793,7 @@ export class NodeRuntime {
           delayMs: delay,
           reason: status,
           previousTarget,
+          ...(redirectTo !== undefined && redirectTo !== previousTarget ? { redirectTo } : {}),
           ...(caller.kind === 'work' ? { workId: caller.item.workId } : {}),
         },
         nodeId: caller.node.id,
@@ -805,12 +814,11 @@ export class NodeRuntime {
     call.retryTimer = undefined;
 
     const policy = caller.node.config.retry;
-    if (policy?.retrySameTarget && call.target !== undefined) {
-      const previous = this.registry.get(call.target);
-      const reachable = this.network.topology.enabledTargetsOf(caller.node.id).includes(call.target);
-      const breakerOk = this.breakerAllows(caller.node, call.target);
-      if (previous && previous.state.status !== 'failed' && reachable && breakerOk) {
-        this.sendAttempt(caller, previous, event.id);
+    const preferred = event.payload.redirectTo ?? (policy?.retrySameTarget ? call.target : undefined);
+    if (preferred !== undefined) {
+      const candidate = this.directTarget(caller, preferred);
+      if (candidate) {
+        this.sendAttempt(caller, candidate, event.id);
         return;
       }
     }
@@ -1145,6 +1153,15 @@ export class NodeRuntime {
 
     const target = this.routing.select(node, body, candidates, excluded);
     return target ? { kind: 'forward', target } : { kind: 'unreachable' };
+  }
+
+  /** `id` if the caller could send to it right now — wired, reachable, up, and not behind an open circuit. */
+  private directTarget(caller: Caller, id: NodeId): SimNode | undefined {
+    const node = this.registry.get(id);
+    if (!node || node.state.status === 'failed' || node.type === 'client') return undefined;
+    if (bodyOf(caller).path.includes(id)) return undefined;
+    if (!this.network.topology.enabledTargetsOf(caller.node.id).includes(id)) return undefined;
+    return this.breakerAllows(caller.node, id) ? node : undefined;
   }
 
   private callerFor(nodeId: NodeId, requestId: RequestId, workId: MessageId | undefined): Caller | undefined {

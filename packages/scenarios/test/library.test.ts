@@ -181,6 +181,37 @@ describe('each scenario shows what it says it shows', () => {
     expect(dlq.enqueued).toBe(dead.length - (dead.filter((e) => e.at > 14_990).length));
   });
 
+  it('leader-election: a new leader in a higher term after the crash', () => {
+    const world = run('leader-election');
+    const elected = world.simulation.log.byType('LEADER_ELECTED');
+    expect(elected[0]!.payload.leaderId).toBe('n1');
+    const next = elected.find((e) => e.at > 4000)!;
+    expect(next.payload.leaderId).not.toBe('n1');
+    expect(next.payload.term).toBeGreaterThan(elected[0]!.payload.term);
+    expect(next.at - 4000).toBeLessThan(500);
+    expect(world.simulation.log.byType('REQUEST_COMPLETED').filter((e) => e.at > next.at + 200).length).toBeGreaterThan(100);
+    // The recovered node follows rather than fighting.
+    expect(elected.filter((e) => e.at > 9000 && e.payload.leaderId === 'n1')).toHaveLength(0);
+    // Writes wait out the election (backoff, then the new leader's redirect) instead of failing.
+    expect(world.simulation.log.byType('REQUEST_FAILED').length).toBeLessThan(5);
+    expect(world.simulation.log.byType('RETRY').some((e) => e.payload.redirectTo === next.payload.leaderId)).toBe(true);
+  });
+
+  it('split-brain: two believed leaders, only the majority commits, the old leader steps down', () => {
+    const world = run('split-brain');
+    const cluster = world.snapshot().modules.consensus.clusters[0]!;
+    expect(cluster.maxBelievedLeaders).toBe(2);
+    const log = world.simulation.log;
+    const sideB = log.byType('REQUEST_COMPLETED').filter((e) => e.payload.clientId === 'b-client' && e.at > 3300 && e.at < 7000);
+    expect(sideB).toHaveLength(0);
+    const sideA = log.byType('REQUEST_COMPLETED').filter((e) => e.payload.clientId === 'a-client' && e.at > 3600 && e.at < 7000);
+    expect(sideA.length).toBeGreaterThan(50);
+    const down = log.byType('STEPPED_DOWN').find((e) => e.payload.nodeId === 'n1' && e.payload.from === 'leader')!;
+    expect(down.at).toBeGreaterThanOrEqual(7000);
+    // Once healed, side B's router follows leader hints to the new leader.
+    expect(log.byType('REQUEST_COMPLETED').filter((e) => e.payload.clientId === 'b-client' && e.at > 7500).length).toBeGreaterThan(50);
+  });
+
   it('thundering-herd: each expiry of the hot key stampedes the database', () => {
     const world = run('thundering-herd');
     const misses = world.simulation.log.byType('CACHE_MISS').filter((e) => e.payload.key === 'key-0' && e.payload.reason === 'expired');

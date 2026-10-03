@@ -5,6 +5,7 @@ import { RoutingSection } from '@/components/modules/RoutingSection';
 import { ReliabilitySection } from '@/components/modules/ReliabilitySection';
 import { DataSection } from '@/components/modules/DataSection';
 import { QueueSection } from '@/components/modules/QueueSection';
+import { ConsensusSection } from '@/components/modules/ConsensusSection';
 
 /**
  * Subsystem settings for a node. Each section decides for itself whether it
@@ -16,6 +17,7 @@ export function ModuleNodeSections({ node }: { node: NodeSpec }) {
       <RoutingSection node={node} />
       <DataSection node={node} />
       <QueueSection node={node} />
+      <ConsensusSection node={node} />
       <ReliabilitySection node={node} />
     </>
   );
