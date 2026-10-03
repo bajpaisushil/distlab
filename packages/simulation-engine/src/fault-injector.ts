@@ -15,7 +15,11 @@ import type { DispatchGate } from './simulation.js';
 
 /** The slice of the kernel the injector needs to pause nodes. */
 export interface DispatchControl {
-  setDispatchGate(gate: DispatchGate | undefined, onHeld?: (event: SimEvent) => void): void;
+  setDispatchGate(
+    gate: DispatchGate | undefined,
+    onHeld?: (event: SimEvent) => void,
+    onCancelHeld?: (id: EventId) => boolean,
+  ): void;
   requeue(event: SimEvent, at: number): void;
 }
 
@@ -112,6 +116,7 @@ export class FaultInjector {
     this.control.setDispatchGate(
       (event) => this.admits(event),
       (event) => this.hold(event),
+      (id) => this.cancelHeld(id),
     );
   }
 
@@ -155,6 +160,18 @@ export class FaultInjector {
     const list = this.held.get(nodeId) ?? [];
     list.push(event);
     this.held.set(nodeId, list);
+  }
+
+  /** Cancelling an event that is waiting for a frozen node removes it from the wait. */
+  private cancelHeld(id: EventId): boolean {
+    for (const [nodeId, list] of this.held) {
+      const index = list.findIndex((e) => e.id === id);
+      if (index < 0) continue;
+      list.splice(index, 1);
+      if (list.length === 0) this.held.delete(nodeId);
+      return true;
+    }
+    return false;
   }
 
   /** Puts a node's held events back, in their original order, to run now. */

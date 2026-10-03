@@ -54,5 +54,15 @@ export function nodeBadges(node: NodeSpec, modules: ModuleTelemetry | undefined)
     else if (raft.role === 'candidate') badges.push({ label: `candidate t${raft.term}`, tone: 'warning' });
     else if (raft.role === 'follower' && raft.term > 0) badges.push({ label: `follower t${raft.term}` });
   }
+  for (const client of modules?.locks.clients ?? []) {
+    if (client.clientId !== node.id) continue;
+    if (client.stale) badges.push({ label: `stale holder t${client.token}`, tone: 'critical' });
+    else if (client.phase === 'holding') badges.push({ label: `holds ${client.resource} t${client.token}`, tone: 'good' });
+    else if (client.phase === 'waiting') badges.push({ label: `waiting for ${client.resource}`, tone: 'warning' });
+  }
+  for (const lock of modules?.locks.resources ?? []) {
+    if (lock.serviceId === node.id && lock.waiting > 0) badges.push({ label: `${lock.resource}: ${lock.waiting} waiting` });
+  }
+  if (node.config?.fencing) badges.push({ label: 'fencing on', tone: 'good' });
   return badges;
 }

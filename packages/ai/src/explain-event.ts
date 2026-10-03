@@ -114,6 +114,37 @@ function typeSpecific(
         interpretation: [],
       };
     }
+    case 'LOCK_EXPIRED': {
+      const p = (event as SimEvent<'LOCK_EXPIRED'>).payload;
+      return {
+        summary: `${label(p.serviceId)} heard nothing from ${label(p.holder)} for a whole lease and took the lock back.`,
+        facts: [measured(`${label(p.holder)} had held token ${p.token} for ${ms(p.heldMs)}.`, event.id)],
+        interpretation: [
+          `From the lock service, a holder that crashed, froze or is cut off all look the same: silent. Only the lease lets it move on.`,
+          `${label(p.holder)} is not told. If it is merely frozen or slow, it still believes it holds the lock.`,
+        ],
+      };
+    }
+    case 'SAFETY_VIOLATION': {
+      const p = (event as SimEvent<'SAFETY_VIOLATION'>).payload;
+      const storage = spec.nodes.find((n) => n.id === p.storageId);
+      return {
+        summary: `${label(p.storageId)} accepted ${label(p.writer)}'s write with lock token ${p.token} after ${p.highestWriter ? label(p.highestWriter) : 'a newer holder'} had already written with token ${p.highestToken}: the older critical section overwrote the newer one.`,
+        facts: storage ? [configured(`${label(storage.id)} does not check fencing tokens.`)] : [],
+        interpretation: [
+          'The lock service never had two holders at once in its own view; the overlap happened because a holder kept acting on a lease that had run out.',
+          `Fencing closes the gap: storage that refuses tokens older than the highest it has accepted would have refused token ${p.token}.`,
+        ],
+      };
+    }
+    case 'FENCED_WRITE_REJECTED': {
+      const p = (event as SimEvent<'FENCED_WRITE_REJECTED'>).payload;
+      return {
+        summary: `${label(p.storageId)} refused ${label(p.writer)}'s write: its token ${p.token} is older than ${p.highestToken}, so its lock had already passed to someone else.`,
+        facts: [configured(`${label(p.storageId)} enforces fencing tokens.`)],
+        interpretation: ['This is fencing doing its job: the stale holder could not overwrite newer data, however late its write arrived.'],
+      };
+    }
     default:
       return { summary: '', facts: [], interpretation: [] };
   }

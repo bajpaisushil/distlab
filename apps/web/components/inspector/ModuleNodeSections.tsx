@@ -6,6 +6,7 @@ import { ReliabilitySection } from '@/components/modules/ReliabilitySection';
 import { DataSection } from '@/components/modules/DataSection';
 import { QueueSection } from '@/components/modules/QueueSection';
 import { ConsensusSection } from '@/components/modules/ConsensusSection';
+import { LockSection } from '@/components/modules/LockSection';
 
 /**
  * Subsystem settings for a node. Each section decides for itself whether it
@@ -18,6 +19,7 @@ export function ModuleNodeSections({ node }: { node: NodeSpec }) {
       <DataSection node={node} />
       <QueueSection node={node} />
       <ConsensusSection node={node} />
+      <LockSection node={node} />
       <ReliabilitySection node={node} />
     </>
   );

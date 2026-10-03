@@ -63,6 +63,66 @@ function raftClient(prefix: string, targets: readonly string[], rate: number, y:
   };
 }
 
+/**
+ * Three billing workers take turns holding one lock while they update the
+ * same invoice. One freezes in a long GC pause partway through its turn.
+ */
+function lockContention(): Scenario {
+  const workers = ['billing-1', 'billing-2', 'billing-3'];
+  return scenario({
+    id: 'lock-contention',
+    name: 'Distributed lock contention',
+    description:
+      'Three billing workers take turns holding a lease-based lock on one invoice, renewing it while they work and writing to the ledger at the end. Worker 1 freezes in a 1.5s GC pause while holding the lock: its lease runs out, the lock moves on — and when it wakes, it finishes its write as if nothing happened. The ledger does not check fencing tokens.',
+    category: 'Coordination',
+    difficulty: 'advanced',
+    seed: 'lock-contention',
+    durationMs: 12_000,
+    nodes: [
+      { id: 'locks', type: 'lock_service', label: 'Lock service', config: { lockService: { defaultLeaseMs: 800 } } },
+      { id: 'ledger', type: 'database', label: 'Ledger', config: { writeLatency: { kind: 'uniform', min: 4, max: 12 }, fencing: false } },
+      ...workers.map((id, i) => ({
+        id,
+        type: 'worker' as const,
+        label: `Billing ${i + 1}`,
+        config: {
+          lockClient: {
+            service: 'locks',
+            resource: 'invoice-42',
+            storage: 'ledger',
+            leaseMs: 800,
+            renewEveryMs: 250,
+            holdMs: { kind: 'uniform' as const, min: 150, max: 350 },
+            thinkMs: { kind: 'uniform' as const, min: 100, max: 300 },
+            acquireTimeoutMs: 3000,
+            startAt: i * 20,
+          },
+        },
+      })),
+    ],
+    links: workers.flatMap((id) => [
+      { from: id, to: 'locks', latency: { kind: 'uniform' as const, min: 2, max: 6 } },
+      { from: id, to: 'ledger', latency: { kind: 'uniform' as const, min: 2, max: 6 } },
+    ]),
+    layout: {
+      locks: { x: 420, y: -60 },
+      ledger: { x: 420, y: 260 },
+      'billing-1': { x: 0, y: -120 },
+      'billing-2': { x: 0, y: 100 },
+      'billing-3': { x: 0, y: 320 },
+    },
+    workloads: [],
+    faults: [{ id: 'gc-pause', kind: 'node_pause', at: 4350, nodeId: 'billing-1', durationMs: 1500 }],
+    learningObjectives: [
+      'A lock service can only promise one holder in its own view. Leases are how it takes a lock back from a holder that went quiet.',
+      'A frozen holder cannot renew, so its lease runs out — but nobody tells it. When it wakes, it still believes it holds the lock: two believed holders at once.',
+      'Its late write lands after the new holder’s and overwrites newer data. That is the safety violation fencing tokens exist to stop.',
+      'Turn on fencing at the ledger (or try the What-if) and the stale write is refused, because its token is older than one the ledger has already seen.',
+    ],
+    observe: ['the ownership strip in Metrics', 'the SAFETY_VIOLATION event after the freeze', 'Billing 1’s “stale holder” badge while it works on'],
+  });
+}
+
 const webTier = {
   nodes: [
     { id: 'client', type: 'client' as const, label: 'Clients' },
@@ -621,6 +681,7 @@ export const SCENARIOS: readonly Scenario[] = [
     ],
     observe: ['QUEUE_DEAD_LETTERED events, each after exactly 3 attempts', 'the dead-letter queue’s depth', 'redeliveries in Metrics'],
   }),
+  lockContention(),
   (() => {
     const raft = raftCluster();
     const clients = raftClient('', ['n1', 'n2', 'n3', 'n4', 'n5'], 40, 30);

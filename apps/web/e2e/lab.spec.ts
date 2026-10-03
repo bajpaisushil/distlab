@@ -119,3 +119,24 @@ test('exports the scenario as JSON', async ({ page }) => {
   await page.getByRole('button', { name: 'Export' }).click();
   expect((await download).suggestedFilename()).toBe('distlab-scenario.json');
 });
+
+test('shows a stale lock holder overwriting data, then fixes it with fencing', async ({ page }) => {
+  const errors = watchErrors(page);
+  await page.goto('/');
+  await page.getByRole('tab', { name: 'Library' }).click();
+  await page.getByTestId('scenario-lock-contention').click();
+  await expect(page.getByTestId('node-billing-1')).toBeVisible();
+
+  await page.keyboard.press('e');
+  await expect.poll(() => clock(page)).toMatch(/^00:12\.000/);
+  await page.getByTestId('tab-metrics').click();
+  await expect(page.getByTestId('metrics')).toContainText('Safety violations');
+  await expect(page.getByTestId('metrics')).toContainText('Ownership');
+
+  await page.getByRole('tab', { name: 'What-if' }).click();
+  await page.getByRole('button', { name: 'Fencing tokens' }).click();
+  await page.getByTestId('run-experiment').click();
+  await expect(page.getByTestId('comparison')).toContainText('Safety violations', { timeout: 30_000 });
+  await expect(page.getByTestId('comparison')).not.toContainText('p99 latency');
+  expect(errors).toEqual([]);
+});

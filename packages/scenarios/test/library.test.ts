@@ -212,6 +212,30 @@ describe('each scenario shows what it says it shows', () => {
     expect(log.byType('REQUEST_COMPLETED').filter((e) => e.payload.clientId === 'b-client' && e.at > 7500).length).toBeGreaterThan(50);
   });
 
+  it('lock-contention: the frozen holder overwrites newer data; fencing stops it', () => {
+    const world = run('lock-contention');
+    const log = world.simulation.log;
+    const lock = world.snapshot().modules.locks.resources[0]!;
+    expect(lock.expirations).toBe(1);
+    expect(lock.maxBelievedHolders).toBe(2);
+    const [violation] = log.byType('SAFETY_VIOLATION');
+    expect(violation!.payload.writer).toBe('billing-1');
+    expect(violation!.at).toBeGreaterThanOrEqual(5850);
+    // Everyone still gets turns, first come first served.
+    const turns = Object.values(lock.acquisitionsByClient);
+    expect(Math.min(...turns)).toBeGreaterThan(10);
+
+    // The same run with the ledger checking tokens.
+    const spec = findScenario('lock-contention')!.spec;
+    const fenced = createSimulation({
+      ...spec,
+      nodes: spec.nodes.map((n) => (n.id === 'ledger' ? { ...n, config: { ...n.config, fencing: true } } : n)),
+    });
+    fenced.run();
+    expect(fenced.simulation.log.byType('SAFETY_VIOLATION')).toHaveLength(0);
+    expect(fenced.simulation.log.byType('FENCED_WRITE_REJECTED')[0]!.payload.writer).toBe('billing-1');
+  });
+
   it('thundering-herd: each expiry of the hot key stampedes the database', () => {
     const world = run('thundering-herd');
     const misses = world.simulation.log.byType('CACHE_MISS').filter((e) => e.payload.key === 'key-0' && e.payload.reason === 'expired');

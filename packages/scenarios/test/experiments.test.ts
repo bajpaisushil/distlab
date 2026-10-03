@@ -95,6 +95,25 @@ describe('compareSnapshots', () => {
     expect(verdictOf(created)).toBe('same');
   });
 
+  it('compares subsystem outcomes, and only the ones a scenario uses', () => {
+    const locks = findScenario('lock-contention')!.spec;
+    const variant = applyExperiment(locks, {
+      name: 'Fencing tokens',
+      changes: [{ kind: 'set_node', nodeId: 'ledger', field: 'fencing', value: true }],
+    });
+    expect(variant.ok).toBe(true);
+    if (!variant.ok) return;
+    const deltas = compareSnapshots(snapshotOf(locks), snapshotOf(variant.variant));
+    const byId = new Map(deltas.map((d) => [d.id, d]));
+    expect(byId.get('safety_violations')).toMatchObject({ a: 1, b: 0 });
+    expect(verdictOf(byId.get('safety_violations')!)).toBe('better');
+    expect(byId.get('fenced')).toMatchObject({ a: 0, b: 1 });
+    // No client traffic in this scenario, so no request rows; no queues, so no queue rows.
+    expect(byId.has('p99')).toBe(false);
+    expect(byId.has('dead_lettered')).toBe(false);
+    expect(byId.has('dropped')).toBe(true);
+  });
+
   it('reports identical runs as identical', () => {
     const snapshot = snapshotOf(baseline);
     for (const delta of compareSnapshots(snapshot, snapshot)) expect(verdictOf(delta)).toBe('same');

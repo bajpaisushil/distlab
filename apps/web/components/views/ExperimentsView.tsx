@@ -103,6 +103,29 @@ const PRESETS: readonly Preset[] = [
     },
   },
   {
+    label: 'Fencing tokens',
+    question: 'What happens if storage refuses writes with an old lock token?',
+    changes: (spec) => {
+      const storage = [...new Set(spec.nodes.map((n) => n.config?.lockClient?.storage).filter((id): id is string => id !== undefined))].filter(
+        (id) => spec.nodes.find((n) => n.id === id)?.config?.fencing !== true,
+      );
+      return storage.length > 0 ? storage.map((id) => ({ kind: 'set_node', nodeId: id, field: 'fencing', value: true }) as ExperimentChange) : undefined;
+    },
+  },
+  {
+    label: 'Leader election: no randomness',
+    question: 'What happens if every Raft node uses the same election timeout?',
+    changes: (spec) => {
+      const members = all(spec, 'consensus');
+      return members.length > 1
+        ? members.map(
+            (n) =>
+              ({ kind: 'set_node', nodeId: n.id, field: 'consensus', value: { ...n.config?.consensus, electionTimeoutMs: { min: 200, max: 200 } } }) as ExperimentChange,
+          )
+        : undefined;
+    },
+  },
+  {
     label: 'Different luck',
     question: 'How much of the result is luck? Same configuration, different seed.',
     changes: () => [{ kind: 'set_seed', seed: 'what-if-reseed' }],

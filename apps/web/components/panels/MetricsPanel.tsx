@@ -28,6 +28,22 @@ export function MetricsPanel() {
   const labels = new Map(spec.nodes.map((n) => [n.id, n.label ?? n.id]));
   const servers = frame.nodes.filter((n) => n.type !== 'client');
 
+  // A scenario with no client traffic (a lock or consensus protocol on its
+  // own) has no requests to measure: lead with the protocol's own metrics.
+  if (spec.workloads.length === 0) {
+    return (
+      <div className="metrics-body" data-testid="metrics">
+        <ModuleMetrics />
+        <div className="stat-grid">
+          <StatTile label="Messages sent" value={formatCount(s.messages.sent)} sub="protocol traffic only — no client requests" />
+          <StatTile label="Dropped messages" value={formatCount(s.messages.dropped)} sub={`${formatCount(s.messages.duplicated)} duplicated`} />
+          <StatTile label="On the wire" value={formatCount(frame.inFlightTotal)} />
+        </div>
+        <PerNodeTable />
+      </div>
+    );
+  }
+
   return (
     <div className="metrics-body" data-testid="metrics">
       <div className="stat-grid">

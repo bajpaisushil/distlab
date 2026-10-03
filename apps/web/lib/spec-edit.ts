@@ -125,9 +125,20 @@ export interface NodePatch {
   readonly status?: NodeSpec['status'];
   /** Merged one level deep: nested objects (retry, replication…) replace wholesale. Undefined values delete. */
   readonly config?: Partial<Record<keyof NodeConfig, unknown>>;
+  /** Nodes this one must be linked to for the new settings to work; missing links are drawn. */
+  readonly connectTo?: readonly NodeId[];
 }
 
 export function updateNode(spec: SimulationSpec, id: NodeId, patch: NodePatch): SimulationSpec {
+  let next = updateNodeOnly(spec, id, patch);
+  for (const target of patch.connectTo ?? []) {
+    if (!next.nodes.some((n) => n.id === target)) continue;
+    next = addLink(next, id, target)?.spec ?? next;
+  }
+  return next;
+}
+
+function updateNodeOnly(spec: SimulationSpec, id: NodeId, patch: NodePatch): SimulationSpec {
   return {
     ...spec,
     nodes: spec.nodes.map((node) => {

@@ -62,7 +62,7 @@ export function RunComparison({
                   </td>
                   <td>
                     {verdict === 'same' ? (
-                      <span className="muted">no meaningful change</span>
+                      <span className="muted">{d.direction === 'neutral' && Math.abs(d.delta) > 1e-9 ? 'changed' : 'no meaningful change'}</span>
                     ) : (
                       <span className={`pill status-${verdict === 'better' ? 'good' : 'critical'}`}>
                         <span className="dot" />
@@ -76,38 +76,40 @@ export function RunComparison({
           </tbody>
         </table>
       </div>
-      <div className="chart-grid">
-        <TimeSeriesChart
-          title="Throughput"
-          subtitle="Completed requests per second"
-          xMax={durationMs}
-          format={(v) => formatCount(v)}
-          series={[
-            { id: 'a', label: labelA, color: 'var(--series-1)', points: a.throughput.completed },
-            { id: 'b', label: labelB, color: 'var(--series-2)', points: b.throughput.completed },
-          ]}
-        />
-        <TimeSeriesChart
-          title="p99 latency"
-          subtitle="Of requests completing in each second"
-          xMax={durationMs}
-          format={(v) => formatMs(v)}
-          series={[
-            { id: 'a', label: labelA, color: 'var(--series-1)', points: a.throughput.percentiles.map((p) => ({ t: p.t, value: p.p99 })) },
-            { id: 'b', label: labelB, color: 'var(--series-2)', points: b.throughput.percentiles.map((p) => ({ t: p.t, value: p.p99 })) },
-          ]}
-        />
-        <TimeSeriesChart
-          title="Failures"
-          subtitle="Failed requests per second"
-          xMax={durationMs}
-          format={(v) => formatCount(v)}
-          series={[
-            { id: 'a', label: labelA, color: 'var(--series-1)', points: a.throughput.failed },
-            { id: 'b', label: labelB, color: 'var(--series-2)', points: b.throughput.failed },
-          ]}
-        />
-      </div>
+      {a.requests.created + b.requests.created > 0 ? (
+        <div className="chart-grid">
+          <TimeSeriesChart
+            title="Throughput"
+            subtitle="Completed requests per second"
+            xMax={durationMs}
+            format={(v) => formatCount(v)}
+            series={[
+              { id: 'a', label: labelA, color: 'var(--series-1)', points: a.throughput.completed },
+              { id: 'b', label: labelB, color: 'var(--series-2)', points: b.throughput.completed },
+            ]}
+          />
+          <TimeSeriesChart
+            title="p99 latency"
+            subtitle="Of requests completing in each second"
+            xMax={durationMs}
+            format={(v) => formatMs(v)}
+            series={[
+              { id: 'a', label: labelA, color: 'var(--series-1)', points: a.throughput.percentiles.map((p) => ({ t: p.t, value: p.p99 })) },
+              { id: 'b', label: labelB, color: 'var(--series-2)', points: b.throughput.percentiles.map((p) => ({ t: p.t, value: p.p99 })) },
+            ]}
+          />
+          <TimeSeriesChart
+            title="Failures"
+            subtitle="Failed requests per second"
+            xMax={durationMs}
+            format={(v) => formatCount(v)}
+            series={[
+              { id: 'a', label: labelA, color: 'var(--series-1)', points: a.throughput.failed },
+              { id: 'b', label: labelB, color: 'var(--series-2)', points: b.throughput.failed },
+            ]}
+          />
+        </div>
+      ) : null}
       <div className="field-hint">
         Same seed, same workload: differences come from the configuration, not from luck. Measured results under this
         workload only — neither design is “better” in general.

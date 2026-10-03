@@ -94,6 +94,7 @@ export class Simulation implements SimulationContext {
   private stopRequested = false;
   private gate: DispatchGate | undefined;
   private onGated: ((event: SimEvent) => void) | undefined;
+  private onCancelHeld: ((id: EventId) => boolean) | undefined;
 
   constructor(options: { seed: string | number; limits: SimulationLimits; logCapacity?: number }) {
     this.seed = String(options.seed);
@@ -185,16 +186,22 @@ export class Simulation implements SimulationContext {
   }
 
   cancel(id: EventId): boolean {
-    return this.queue.cancel(id);
+    // An event held at a frozen node is out of the queue but still pending.
+    return this.queue.cancel(id) || (this.onCancelHeld?.(id) ?? false);
   }
 
   /**
    * Installs a gate consulted before every dispatch. Held events are passed
    * to `onHeld` and must be returned with `requeue` to run at all.
    */
-  setDispatchGate(gate: DispatchGate | undefined, onHeld?: (event: SimEvent) => void): void {
+  setDispatchGate(
+    gate: DispatchGate | undefined,
+    onHeld?: (event: SimEvent) => void,
+    onCancelHeld?: (id: EventId) => boolean,
+  ): void {
     this.gate = gate;
     this.onGated = onHeld;
+    this.onCancelHeld = onCancelHeld;
   }
 
   /**

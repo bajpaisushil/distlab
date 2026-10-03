@@ -69,6 +69,9 @@ const NODE_FIELDS = new Set([
   'consumer',
   // coordination
   'consensus',
+  'lockService',
+  'lockClient',
+  'fencing',
 ]);
 
 const LINK_FIELDS = new Set([

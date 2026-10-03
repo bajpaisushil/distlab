@@ -15,22 +15,28 @@ export interface MetricDelta {
   readonly unit: 'ms' | 'ratio' | 'count' | 'rate';
 }
 
+const hasTraffic = (s: TelemetrySnapshot) => s.requests.created > 0;
+const sum = <T>(items: readonly T[], read: (item: T) => number) => items.reduce((total, item) => total + read(item), 0);
+const maxOf = <T>(items: readonly T[], read: (item: T) => number) => Math.max(0, ...items.map(read));
+
 const METRICS: readonly {
   id: string;
   label: string;
   unit: MetricDelta['unit'];
   direction: Direction;
   read(s: TelemetrySnapshot): number;
+  /** Shown only when either run uses the subsystem. Core request metrics always apply. */
+  applies?(s: TelemetrySnapshot): boolean;
 }[] = [
-  { id: 'throughput', label: 'Throughput', unit: 'rate', direction: 'higher_is_better', read: (s) => s.requests.throughputPerSec },
-  { id: 'success', label: 'Success rate', unit: 'ratio', direction: 'higher_is_better', read: (s) => s.requests.successRate },
-  { id: 'errors', label: 'Failed requests', unit: 'count', direction: 'lower_is_better', read: (s) => s.requests.failed },
-  { id: 'p50', label: 'p50 latency', unit: 'ms', direction: 'lower_is_better', read: (s) => s.latency.p50 },
-  { id: 'p95', label: 'p95 latency', unit: 'ms', direction: 'lower_is_better', read: (s) => s.latency.p95 },
-  { id: 'p99', label: 'p99 latency', unit: 'ms', direction: 'lower_is_better', read: (s) => s.latency.p99 },
-  { id: 'max', label: 'Max latency', unit: 'ms', direction: 'lower_is_better', read: (s) => s.latency.max },
-  { id: 'timeouts', label: 'Timeouts', unit: 'count', direction: 'lower_is_better', read: (s) => s.timeouts },
-  { id: 'rejected', label: 'Rejected', unit: 'count', direction: 'lower_is_better', read: (s) => s.requests.rejected },
+  { id: 'throughput', label: 'Throughput', unit: 'rate', direction: 'higher_is_better', read: (s) => s.requests.throughputPerSec, applies: hasTraffic },
+  { id: 'success', label: 'Success rate', unit: 'ratio', direction: 'higher_is_better', read: (s) => s.requests.successRate, applies: hasTraffic },
+  { id: 'errors', label: 'Failed requests', unit: 'count', direction: 'lower_is_better', read: (s) => s.requests.failed, applies: hasTraffic },
+  { id: 'p50', label: 'p50 latency', unit: 'ms', direction: 'lower_is_better', read: (s) => s.latency.p50, applies: hasTraffic },
+  { id: 'p95', label: 'p95 latency', unit: 'ms', direction: 'lower_is_better', read: (s) => s.latency.p95, applies: hasTraffic },
+  { id: 'p99', label: 'p99 latency', unit: 'ms', direction: 'lower_is_better', read: (s) => s.latency.p99, applies: hasTraffic },
+  { id: 'max', label: 'Max latency', unit: 'ms', direction: 'lower_is_better', read: (s) => s.latency.max, applies: hasTraffic },
+  { id: 'timeouts', label: 'Timeouts', unit: 'count', direction: 'lower_is_better', read: (s) => s.timeouts, applies: hasTraffic },
+  { id: 'rejected', label: 'Rejected', unit: 'count', direction: 'lower_is_better', read: (s) => s.requests.rejected, applies: hasTraffic },
   { id: 'dropped', label: 'Dropped messages', unit: 'count', direction: 'lower_is_better', read: (s) => s.messages.dropped },
   {
     id: 'peak_queue',
@@ -38,6 +44,7 @@ const METRICS: readonly {
     unit: 'count',
     direction: 'lower_is_better',
     read: (s) => Math.max(0, ...s.nodes.map((n) => n.maxQueueDepth)),
+    applies: hasTraffic,
   },
   {
     id: 'peak_utilization',
@@ -45,8 +52,123 @@ const METRICS: readonly {
     unit: 'ratio',
     direction: 'neutral',
     read: (s) => Math.max(0, ...s.nodes.filter((n) => n.utilization > 0).map((n) => n.utilization)),
+    applies: hasTraffic,
   },
-  { id: 'created', label: 'Requests issued', unit: 'count', direction: 'neutral', read: (s) => s.requests.created },
+  { id: 'created', label: 'Requests issued', unit: 'count', direction: 'neutral', read: (s) => s.requests.created, applies: hasTraffic },
+
+  // Subsystems — only when in use.
+  {
+    id: 'retries',
+    label: 'Retries',
+    unit: 'count',
+    direction: 'lower_is_better',
+    read: (s) => s.modules.reliability.retries,
+    applies: (s) => s.modules.reliability.retries > 0 || s.modules.reliability.circuits.length > 0,
+  },
+  {
+    id: 'stale_reads',
+    label: 'Stale reads',
+    unit: 'count',
+    direction: 'lower_is_better',
+    read: (s) => s.modules.data.staleReads,
+    applies: (s) => s.modules.data.replicas.length > 0,
+  },
+  {
+    id: 'version_regressions',
+    label: 'Version regressions',
+    unit: 'count',
+    direction: 'lower_is_better',
+    read: (s) => s.modules.data.versionRegressions,
+    applies: (s) => s.modules.data.replicas.length > 0,
+  },
+  {
+    id: 'duplicate_writes',
+    label: 'Duplicate writes applied',
+    unit: 'count',
+    direction: 'lower_is_better',
+    read: (s) => s.modules.data.duplicateWritesApplied,
+    applies: (s) => s.modules.data.duplicateWritesApplied + s.modules.data.duplicateWritesSuppressed > 0,
+  },
+  {
+    id: 'dead_lettered',
+    label: 'Dead-lettered messages',
+    unit: 'count',
+    direction: 'lower_is_better',
+    read: (s) => sum(s.modules.queues.queues, (q) => q.deadLettered),
+    applies: (s) => s.modules.queues.queues.length > 0,
+  },
+  {
+    id: 'redelivered',
+    label: 'Redeliveries',
+    unit: 'count',
+    direction: 'lower_is_better',
+    read: (s) => sum(s.modules.queues.queues, (q) => q.redelivered),
+    applies: (s) => s.modules.queues.queues.length > 0,
+  },
+  {
+    id: 'elections',
+    label: 'Leader elections',
+    unit: 'count',
+    direction: 'lower_is_better',
+    read: (s) => sum(s.modules.consensus.clusters, (c) => c.elections),
+    applies: (s) => s.modules.consensus.clusters.length > 0,
+  },
+  {
+    id: 'leaderless',
+    label: 'Time without a leader',
+    unit: 'ms',
+    direction: 'lower_is_better',
+    read: (s) => sum(s.modules.consensus.clusters, (c) => c.unavailableMs),
+    applies: (s) => s.modules.consensus.clusters.length > 0,
+  },
+  {
+    id: 'commits',
+    label: 'Committed entries',
+    unit: 'count',
+    direction: 'higher_is_better',
+    read: (s) => sum(s.modules.consensus.clusters, (c) => c.commits),
+    applies: (s) => s.modules.consensus.clusters.length > 0,
+  },
+  {
+    id: 'lock_acquisitions',
+    label: 'Lock acquisitions',
+    unit: 'count',
+    direction: 'higher_is_better',
+    read: (s) => sum(s.modules.locks.resources, (r) => r.acquisitions),
+    applies: (s) => s.modules.locks.resources.length > 0,
+  },
+  {
+    id: 'lock_wait_p95',
+    label: 'Lock wait p95 (worst lock)',
+    unit: 'ms',
+    direction: 'lower_is_better',
+    read: (s) => maxOf(s.modules.locks.resources, (r) => r.wait.p95),
+    applies: (s) => s.modules.locks.resources.length > 0,
+  },
+  {
+    id: 'lease_expiries',
+    label: 'Lock leases expired',
+    unit: 'count',
+    direction: 'lower_is_better',
+    read: (s) => sum(s.modules.locks.resources, (r) => r.expirations),
+    applies: (s) => s.modules.locks.resources.length > 0,
+  },
+  {
+    id: 'fenced',
+    label: 'Stale writes refused by fencing',
+    unit: 'count',
+    direction: 'neutral',
+    read: (s) => sum(s.modules.locks.resources, (r) => r.fencedRejections),
+    applies: (s) => s.modules.locks.resources.length > 0,
+  },
+  {
+    id: 'safety_violations',
+    label: 'Safety violations',
+    unit: 'count',
+    direction: 'lower_is_better',
+    read: (s) => sum(s.modules.locks.resources, (r) => r.safetyViolations),
+    applies: (s) => s.modules.locks.resources.length > 0,
+  },
 ];
 
 /**
@@ -55,7 +177,7 @@ const METRICS: readonly {
  * fewer successful requests depends on what the system is for.
  */
 export function compareSnapshots(a: TelemetrySnapshot, b: TelemetrySnapshot): MetricDelta[] {
-  return METRICS.map((metric) => {
+  return METRICS.filter((metric) => !metric.applies || metric.applies(a) || metric.applies(b)).map((metric) => {
     const va = metric.read(a);
     const vb = metric.read(b);
     return {

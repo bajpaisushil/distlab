@@ -1123,11 +1123,12 @@ export class NodeRuntime {
    */
   private route(node: SimNode, body: RequestBody): RouteOutcome {
     // Requests follow the direction links are drawn, never back upstream, and
-    // never to a client — clients originate traffic, they do not serve it. A
-    // node already on the path is skipped so cycles cannot loop forever.
+    // never to a client — clients originate traffic, they do not serve it —
+    // nor to a lock service, which only speaks the lock protocol. A node
+    // already on the path is skipped so cycles cannot loop forever.
     const configured = this.network.topology
       .targetsOf(node.id)
-      .filter((id) => !body.path.includes(id) && this.registry.get(id)?.type !== 'client');
+      .filter((id) => !body.path.includes(id) && !NOT_SERVERS.has(this.registry.get(id)?.type ?? 'client'));
     if (configured.length === 0) return { kind: 'terminal' };
 
     const reachable = new Set(this.network.topology.enabledTargetsOf(node.id));
@@ -1269,6 +1270,9 @@ export class NodeRuntime {
     return message.kind === 'REQUEST';
   }
 }
+
+/** Node types that never serve application requests. */
+const NOT_SERVERS = new Set<NodeType>(['client', 'lock_service']);
 
 function newCall(): Call {
   return {
