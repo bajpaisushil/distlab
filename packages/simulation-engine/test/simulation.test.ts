@@ -102,6 +102,31 @@ describe('Simulation execution control', () => {
     expect(sim.status).toBe('completed');
   });
 
+  it('pauses at a caller time limit short of the horizon instead of completing', () => {
+    const sim = makeSim({ durationMs: 1000 });
+    scheduleChain(sim, 100, 100);
+    const partial = sim.run({ untilTime: 450 });
+    expect(partial.reason).toBe('stopped');
+    expect(partial.hasMore).toBe(true);
+    expect(sim.status).toBe('paused');
+    expect(sim.now()).toBe(450);
+    expect(sim.eventsProcessed).toBe(4);
+
+    // Continuing in slices lands on exactly the same run as going straight through.
+    sim.run({ untilTime: 777 });
+    const rest = sim.run();
+    expect(rest.reason).toBe('duration_reached');
+    expect(sim.eventsProcessed).toBe(10);
+    expect(sim.now()).toBe(1000);
+  });
+
+  it('never runs past the configured duration even when asked to', () => {
+    const sim = makeSim({ durationMs: 450 });
+    scheduleChain(sim, 100, 100);
+    expect(sim.run({ untilTime: 10_000 }).reason).toBe('duration_reached');
+    expect(sim.now()).toBe(450);
+  });
+
   it('stops when the queue drains', () => {
     const sim = makeSim();
     scheduleChain(sim, 100, 3);

@@ -247,7 +247,8 @@ export class Simulation implements SimulationContext {
    * as fast as the CPU allows, and animating them is the UI's problem.
    */
   run(options: RunOptions = {}): RunResult {
-    const untilTime = options.untilTime ?? this.limits.durationMs;
+    // A caller's time limit is a pause point; only the configured duration ends the run.
+    const stopAt = Math.min(options.untilTime ?? this.limits.durationMs, this.limits.durationMs);
     const callBudget = options.maxEvents ?? Number.POSITIVE_INFINITY;
     this.stopRequested = false;
     if (this.state === 'completed') {
@@ -282,10 +283,15 @@ export class Simulation implements SimulationContext {
       if (next === undefined) {
         return this.complete('queue_drained', processedHere);
       }
-      if (next.at > untilTime) {
-        // Advance to the horizon so metric windows and utilisation cover the
-        // full configured duration rather than stopping at the last event.
-        this.clock.advanceTo(untilTime);
+      if (next.at > stopAt) {
+        // Let virtual time reach the stop point even with no event there, so
+        // utilisation and rate windows cover it rather than ending at the last event.
+        this.clock.advanceTo(Math.max(this.clock.now(), stopAt));
+        if (stopAt < this.limits.durationMs) {
+          // Playback paused partway: nothing is decided yet, the run stays open.
+          this.state = 'paused';
+          return { reason: 'stopped', eventsProcessed: processedHere, endedAt: this.clock.now(), hasMore: true };
+        }
         return this.complete('duration_reached', processedHere);
       }
       this.step();
