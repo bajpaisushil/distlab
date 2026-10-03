@@ -8,6 +8,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@distlab/shared': pkg('shared'),
+      '@distlab/algorithms': pkg('algorithms'),
       '@distlab/network': pkg('network'),
       '@distlab/telemetry': pkg('telemetry'),
       '@distlab/simulation-engine': pkg('simulation-engine'),

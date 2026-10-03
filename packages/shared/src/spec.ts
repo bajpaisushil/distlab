@@ -1,12 +1,25 @@
 import type { LinkId, NodeId, WorkloadId } from './ids.js';
-import type { LatencySpec } from './latency.js';
-import type { FaultSpec } from './faults.js';
+import { validateFault, type FaultSpec } from './faults.js';
 import type { LinkConfig, PartitionSpec } from './network-types.js';
 import type { NodeConfig, NodeStatus, NodeType } from './nodes.js';
 import type { OperationType } from './messages.js';
 import type { SimTime } from './time.js';
 import { DEFAULT_LINK_CONFIG } from './network-types.js';
 import { DEFAULT_NODE_CONFIG, NODE_TYPE_DEFAULTS } from './nodes.js';
+import {
+  checkLatency,
+  checkNonNegative,
+  checkPositive,
+  checkProbability,
+  type IssueReporter,
+  type SpecValidationContext,
+} from './validation.js';
+import { validateReliabilityConfig } from './protocols/requests.js';
+import { validateRoutingConfig } from './protocols/routing.js';
+import { validateDataConfig } from './protocols/data.js';
+import { validateQueueConfig } from './protocols/queue.js';
+import { validateConsensusConfig } from './protocols/consensus.js';
+import { validateLockConfig } from './protocols/locks.js';
 
 /** Bumped when the on-disk shape changes incompatibly. */
 export const SPEC_VERSION = 1;
@@ -48,6 +61,15 @@ export interface WorkloadSpec {
   maxRequests?: number;
   /** How long the client waits before abandoning a request. */
   deadlineMs?: number;
+  /**
+   * A weighted mix of operations instead of a single one — e.g. 90% reads and
+   * 10% writes. When set, `operation` is only the label for the workload.
+   */
+  mix?: { operation: OperationType; weight: number }[];
+  /** Size of the key space storage operations draw from (`key-0` .. `key-N-1`). */
+  keys?: number;
+  /** Fraction of requests aimed at `key-0`, to model a hot key. */
+  hotKeyShare?: number;
 }
 
 /**
@@ -74,6 +96,12 @@ export interface SimulationSpec {
   partitions?: PartitionSpec[];
   /** Faults scheduled to happen partway through the run. */
   faults?: FaultSpec[];
+  /** What a learner should come away understanding. */
+  learningObjectives?: string[];
+  /** Things worth watching while it runs. */
+  observe?: string[];
+  category?: string;
+  tags?: string[];
 }
 
 export interface ResolvedNodeSpec {
@@ -85,8 +113,12 @@ export interface ResolvedNodeSpec {
   readonly status: NodeStatus;
 }
 
-export interface ResolvedWorkloadSpec extends Required<Omit<WorkloadSpec, 'stopAt'>> {
+export interface ResolvedWorkloadSpec
+  extends Required<Omit<WorkloadSpec, 'stopAt' | 'mix' | 'keys' | 'hotKeyShare'>> {
   readonly stopAt: SimTime | undefined;
+  readonly mix: readonly { operation: OperationType; weight: number }[];
+  readonly keys: number;
+  readonly hotKeyShare: number;
 }
 
 export interface ResolvedSpec {
@@ -102,6 +134,8 @@ export interface ResolvedSpec {
   readonly workloads: readonly ResolvedWorkloadSpec[];
   readonly partitions: readonly PartitionSpec[];
   readonly faults: readonly ResolvedFaultSpec[];
+  readonly learningObjectives: readonly string[];
+  readonly observe: readonly string[];
 }
 
 export type ResolvedFaultSpec = FaultSpec & { readonly id: string };
@@ -153,6 +187,7 @@ export function validateSimulationSpec(input: unknown): ValidationResult {
   checkPositive(spec.maxEvents, 'maxEvents', push, true);
 
   const nodeIds = new Set<NodeId>();
+  const nodeTypes = new Map<NodeId, NodeType>();
   if (!Array.isArray(spec.nodes) || spec.nodes.length === 0) {
     push('nodes', 'must be a non-empty array');
   } else {
@@ -166,6 +201,8 @@ export function validateSimulationSpec(input: unknown): ValidationResult {
       nodeIds.add(node.id);
       if (!(node.type in NODE_TYPE_DEFAULTS)) {
         push(`${path}.type`, `unknown node type "${String(node.type)}"`);
+      } else {
+        nodeTypes.set(node.id, node.type);
       }
       const cfg = node.config;
       if (cfg) {
@@ -180,6 +217,7 @@ export function validateSimulationSpec(input: unknown): ValidationResult {
   }
 
   const linkIds = new Set<LinkId>();
+  const resolvedLinks: { id: LinkId; from: NodeId; to: NodeId }[] = [];
   if (!Array.isArray(spec.links)) {
     push('links', 'must be an array');
   } else {
@@ -195,12 +233,31 @@ export function validateSimulationSpec(input: unknown): ValidationResult {
       const id = link.id ?? linkIdFor(link.from, link.to);
       if (linkIds.has(id)) push(`${path}.id`, `duplicate link id "${id}"`);
       linkIds.add(id);
+      resolvedLinks.push({ id, from: link.from, to: link.to });
       checkProbability(link.lossRate, `${path}.lossRate`, push);
       checkProbability(link.duplicateRate, `${path}.duplicateRate`, push);
       checkProbability(link.reorderRate, `${path}.reorderRate`, push);
       checkNonNegative(link.bandwidthBytesPerSec, `${path}.bandwidthBytesPerSec`, push);
       checkLatency(link.latency, `${path}.latency`, push);
       checkLatency(link.reorderDelay, `${path}.reorderDelay`, push);
+    });
+  }
+
+  const context: SpecValidationContext = { nodeIds, nodeTypes, linkIds, links: resolvedLinks };
+
+  // Subsystem settings are validated once every node and link is known,
+  // because most of their rules are cross-references.
+  if (Array.isArray(spec.nodes)) {
+    spec.nodes.forEach((node, i) => {
+      const cfg = node?.config;
+      if (!cfg || typeof cfg !== 'object') return;
+      const path = `nodes[${i}].config`;
+      validateRoutingConfig(cfg, path, push, context);
+      validateDataConfig(cfg, path, push, context);
+      validateReliabilityConfig(cfg, path, push, context);
+      validateQueueConfig(cfg, path, push, context);
+      validateConsensusConfig(cfg, path, push, context);
+      validateLockConfig(cfg, path, push, context);
     });
   }
 
@@ -228,6 +285,22 @@ export function validateSimulationSpec(input: unknown): ValidationResult {
       checkNonNegative(w?.sizeBytes, `${path}.sizeBytes`, push);
       checkPositive(w?.deadlineMs, `${path}.deadlineMs`, push, true);
       validateArrival(w?.arrival, `${path}.arrival`, push);
+      if (w?.keys !== undefined && (!Number.isInteger(w.keys) || w.keys < 1)) {
+        push(`${path}.keys`, 'must be an integer of at least 1');
+      }
+      checkProbability(w?.hotKeyShare, `${path}.hotKeyShare`, push);
+      if (w?.mix !== undefined) {
+        if (!Array.isArray(w.mix) || w.mix.length === 0) {
+          push(`${path}.mix`, 'must be a non-empty array');
+        } else {
+          w.mix.forEach((entry, m) => {
+            if (typeof entry?.operation !== 'string' || entry.operation.length === 0) {
+              push(`${path}.mix[${m}].operation`, 'must be a non-empty string');
+            }
+            checkPositive(entry?.weight, `${path}.mix[${m}].weight`, push, false);
+          });
+        }
+      }
     });
   }
 
@@ -261,78 +334,12 @@ export function validateSimulationSpec(input: unknown): ValidationResult {
     } else {
       const faultIds = new Set<string>();
       spec.faults.forEach((fault, i) => {
-        validateFault(fault, `faults[${i}]`, nodeIds, linkIds, faultIds, push);
+        validateFault(fault, `faults[${i}]`, push, context, faultIds);
       });
     }
   }
 
   return { valid: errors.length === 0, errors };
-}
-
-function validateFault(
-  fault: FaultSpec | undefined,
-  path: string,
-  nodeIds: ReadonlySet<NodeId>,
-  linkIds: ReadonlySet<LinkId>,
-  seen: Set<string>,
-  push: Push,
-): void {
-  if (!fault || typeof fault !== 'object') {
-    push(path, 'must be a fault spec');
-    return;
-  }
-  if (fault.id !== undefined) {
-    if (seen.has(fault.id)) push(`${path}.id`, `duplicate fault id "${fault.id}"`);
-    seen.add(fault.id);
-  }
-  checkNonNegative(fault.at, `${path}.at`, push);
-  if (fault.at === undefined) push(`${path}.at`, 'is required');
-
-  const requireNode = (id: NodeId | undefined, field: string) => {
-    if (typeof id !== 'string' || !nodeIds.has(id)) push(`${path}.${field}`, `unknown node "${String(id)}"`);
-  };
-  const requireLink = (id: LinkId | undefined, field: string) => {
-    if (typeof id !== 'string' || !linkIds.has(id)) push(`${path}.${field}`, `unknown link "${String(id)}"`);
-  };
-
-  switch (fault.kind) {
-    case 'node_crash':
-      requireNode(fault.nodeId, 'nodeId');
-      checkPositive(fault.recoverAfter, `${path}.recoverAfter`, push, true);
-      return;
-    case 'link_down':
-      requireLink(fault.linkId, 'linkId');
-      checkPositive(fault.restoreAfter, `${path}.restoreAfter`, push, true);
-      return;
-    case 'partition':
-      if (!Array.isArray(fault.groups) || fault.groups.length < 2) {
-        push(`${path}.groups`, 'a partition needs at least two groups');
-        return;
-      }
-      fault.groups.forEach((group, g) => {
-        if (!Array.isArray(group) || group.length === 0) {
-          push(`${path}.groups[${g}]`, 'must be a non-empty array of node ids');
-          return;
-        }
-        group.forEach((id, n) => requireNode(id, `groups[${g}][${n}]`));
-      });
-      checkPositive(fault.healAfter, `${path}.healAfter`, push, true);
-      return;
-    case 'latency_spike':
-      requireLink(fault.linkId, 'linkId');
-      checkLatency(fault.latency, `${path}.latency`, push);
-      if (fault.latency === undefined) push(`${path}.latency`, 'is required');
-      checkPositive(fault.durationMs, `${path}.durationMs`, push, true);
-      return;
-    case 'packet_loss':
-      requireLink(fault.linkId, 'linkId');
-      checkProbability(fault.lossRate, `${path}.lossRate`, push);
-      if (fault.lossRate === undefined) push(`${path}.lossRate`, 'is required');
-      checkPositive(fault.durationMs, `${path}.durationMs`, push, true);
-      return;
-    default:
-      push(`${path}.kind`, `unknown fault kind "${String((fault as { kind: string }).kind)}"`);
-  }
 }
 
 /** Applies type defaults and derived ids so the engine only ever sees complete configuration. */
@@ -361,6 +368,10 @@ export function resolveSimulationSpec(spec: SimulationSpec): ResolvedSpec {
     arrival: w.arrival,
     sizeBytes: w.sizeBytes ?? 512,
     deadlineMs: w.deadlineMs ?? DEFAULT_REQUEST_DEADLINE_MS,
+    mix: w.mix ?? [{ operation: w.operation, weight: 1 }],
+    // 0 means unkeyed: the workload's requests carry no storage key.
+    keys: w.keys ?? 0,
+    hotKeyShare: w.hotKeyShare ?? 0,
     startAt: w.startAt ?? 0,
     stopAt: w.stopAt,
     maxRequests: w.maxRequests ?? Number.POSITIVE_INFINITY,
@@ -379,6 +390,8 @@ export function resolveSimulationSpec(spec: SimulationSpec): ResolvedSpec {
     workloads,
     partitions: spec.partitions ?? [],
     faults: (spec.faults ?? []).map((fault, index) => ({ ...fault, id: fault.id ?? `fault-${index + 1}` })),
+    learningObjectives: spec.learningObjectives ?? [],
+    observe: spec.observe ?? [],
   };
 }
 
@@ -399,7 +412,7 @@ export function serializeSimulationSpec(spec: SimulationSpec): string {
   return JSON.stringify(spec, null, 2);
 }
 
-type Push = (path: string, message: string) => void;
+type Push = IssueReporter;
 
 function validateArrival(arrival: ArrivalSpec | undefined, path: string, push: Push): void {
   if (!arrival || typeof arrival !== 'object') {
@@ -423,62 +436,9 @@ function validateArrival(arrival: ArrivalSpec | undefined, path: string, push: P
   }
 }
 
-function checkLatency(value: LatencySpec | undefined, path: string, push: Push): void {
-  if (value === undefined) return;
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value) || value < 0) push(path, 'latency must be a finite, non-negative number');
-    return;
-  }
-  if (typeof value !== 'object' || value === null) {
-    push(path, 'must be a number or latency distribution');
-    return;
-  }
-  switch (value.kind) {
-    case 'fixed':
-      checkNonNegative(value.value, `${path}.value`, push);
-      return;
-    case 'uniform':
-      checkNonNegative(value.min, `${path}.min`, push);
-      checkNonNegative(value.max, `${path}.max`, push);
-      if (typeof value.min === 'number' && typeof value.max === 'number' && value.min > value.max) {
-        push(path, 'min must not exceed max');
-      }
-      return;
-    case 'normal':
-      checkNonNegative(value.mean, `${path}.mean`, push);
-      checkNonNegative(value.stddev, `${path}.stddev`, push);
-      return;
-    case 'exponential':
-      checkNonNegative(value.mean, `${path}.mean`, push);
-      return;
-    default:
-      push(`${path}.kind`, `unknown latency kind "${String((value as { kind: string }).kind)}"`);
-  }
-}
 
-function checkProbability(value: unknown, path: string, push: Push): void {
-  if (value === undefined) return;
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
-    push(path, 'must be a probability between 0 and 1');
-  }
-}
 
-function checkNonNegative(value: unknown, path: string, push: Push): void {
-  if (value === undefined) return;
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-    push(path, 'must be a finite, non-negative number');
-  }
-}
 
-function checkPositive(value: unknown, path: string, push: Push, optional: boolean): void {
-  if (value === undefined) {
-    if (!optional) push(path, 'is required');
-    return;
-  }
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-    push(path, 'must be a finite number greater than 0');
-  }
-}
 
 function stripUndefined<T extends object>(value: T): Partial<T> {
   return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as Partial<T>;

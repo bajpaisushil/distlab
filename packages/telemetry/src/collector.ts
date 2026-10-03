@@ -1,7 +1,8 @@
 import type { NodeId, SimEvent, SimTime } from '@distlab/shared';
-import { LogCollector, type LogLevel } from './logs.js';
-import { EMPTY_PERCENTILES, MetricsRegistry, type Percentiles } from './metrics.js';
-import { TraceCollector } from './traces.js';
+import { LogCollector, type LogLevel, type LogRecord } from './logs.js';
+import { EMPTY_PERCENTILES, MetricsRegistry, type MetricsState, type Percentiles } from './metrics.js';
+import { TraceCollector, type Trace } from './traces.js';
+import { TELEMETRY_MODULES, moduleSnapshots, type ModuleTelemetry } from './modules/index.js';
 
 /** Node state the engine owns; telemetry reads it rather than duplicating it. */
 export interface NodeStateInput {
@@ -42,12 +43,22 @@ export interface TelemetrySnapshot {
     readonly dropsByReason: Record<string, number>;
   };
   readonly timeouts: number;
-  readonly database: { readonly reads: number; readonly writes: number };
   readonly nodes: readonly NodeTelemetry[];
   readonly throughput: {
     readonly completed: readonly { t: SimTime; value: number }[];
     readonly failed: readonly { t: SimTime; value: number }[];
+    /** Mean latency of requests completing in each window. */
+    readonly latency: readonly { t: SimTime; value: number }[];
   };
+  /** Sections contributed by each subsystem. */
+  readonly modules: ModuleTelemetry;
+}
+
+/** Everything the collector holds, for checkpoints. */
+export interface TelemetryState {
+  readonly logs: readonly LogRecord[];
+  readonly metrics: MetricsState;
+  readonly traces: readonly Trace[];
 }
 
 export interface TelemetryOptions {
@@ -85,6 +96,7 @@ export class TelemetryCollector {
     this.logs.record(event);
     if (this.captureTraces) this.traces.observe(event);
     this.recordMetrics(event);
+    for (const module of TELEMETRY_MODULES) module.record(event, this.metrics);
   }
 
   snapshot(elapsedMs: SimTime, nodes: readonly NodeStateInput[]): TelemetrySnapshot {
@@ -114,22 +126,34 @@ export class TelemetryCollector {
         dropsByReason: this.metrics.counter('messages.dropped').byLabel(),
       },
       timeouts: this.metrics.counter('timeouts').total,
-      database: {
-        reads: this.metrics.counter('db.reads').total,
-        writes: this.metrics.counter('db.writes').total,
-      },
       nodes: nodes.map((node) => ({
         ...node,
         maxQueueDepth: this.metrics.gauge(`node.${node.id}.queue_depth`).max,
-        serviceTime: this.hasHistogram(`node.${node.id}.service_time`)
+        serviceTime: this.metrics.hasHistogram(`node.${node.id}.service_time`)
           ? this.metrics.histogram(`node.${node.id}.service_time`).percentiles()
           : EMPTY_PERCENTILES,
       })),
       throughput: {
         completed: this.metrics.timeSeries('requests.completed').ratePerSecond(),
         failed: this.metrics.timeSeries('requests.failed').ratePerSecond(),
+        latency: this.metrics.timeSeries('requests.completed').meanPerWindow(),
       },
+      modules: moduleSnapshots(this.metrics, elapsedMs),
     };
+  }
+
+  captureState(): TelemetryState {
+    return {
+      logs: this.logs.captureState(),
+      metrics: this.metrics.captureState(),
+      traces: this.traces.captureState(),
+    };
+  }
+
+  restoreState(state: TelemetryState): void {
+    this.logs.restoreState(state.logs);
+    this.metrics.restoreState(state.metrics);
+    this.traces.restoreState(state.traces);
   }
 
   private recordMetrics(event: SimEvent): void {
@@ -193,18 +217,6 @@ export class TelemetryCollector {
         this.metrics.counter('timeouts').add(1, p.nodeId);
         return;
       }
-      case 'DB_READ': {
-        const p = (event as SimEvent<'DB_READ'>).payload;
-        this.metrics.counter('db.reads').add(1, p.nodeId);
-        this.metrics.histogram(`db.${p.nodeId}.read`).record(p.latency);
-        return;
-      }
-      case 'DB_WRITE': {
-        const p = (event as SimEvent<'DB_WRITE'>).payload;
-        this.metrics.counter('db.writes').add(1, p.nodeId);
-        this.metrics.histogram(`db.${p.nodeId}.write`).record(p.latency);
-        return;
-      }
       case 'NODE_FAILED':
         this.metrics.counter('nodes.failed').add(1, (event as SimEvent<'NODE_FAILED'>).payload.nodeId);
         return;
@@ -216,7 +228,4 @@ export class TelemetryCollector {
     }
   }
 
-  private hasHistogram(name: string): boolean {
-    return this.metrics.histogramNames().includes(name);
-  }
 }

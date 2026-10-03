@@ -7,6 +7,7 @@ const config: NextConfig = {
   // exact same files.
   transpilePackages: [
     '@distlab/shared',
+    '@distlab/algorithms',
     '@distlab/network',
     '@distlab/telemetry',
     '@distlab/simulation-engine',

@@ -1,6 +1,14 @@
 import type { LatencySpec } from './latency.js';
 import type { LinkId, NodeId } from './ids.js';
 import type { SimTime } from './time.js';
+import {
+  checkLatency,
+  checkNonNegative,
+  checkPositive,
+  checkProbability,
+  type IssueReporter,
+  type SpecValidationContext,
+} from './validation.js';
 
 /**
  * A scheduled fault.
@@ -77,5 +85,92 @@ export function describeFault(fault: FaultSpec): string {
       return `${fault.linkId} drops ${(fault.lossRate * 100).toFixed(0)}% of packets at ${at}${
         fault.durationMs ? ` for ${fault.durationMs}ms` : ''
       }`;
+  }
+}
+
+export interface FaultEventPayloads {
+  /** A scheduled fault took effect. Its concrete consequences follow as their own events. */
+  FAULT_INJECTED: { faultId: string; kind: FaultKind; description: string };
+  /** A scheduled fault's duration ended. */
+  FAULT_CLEARED: { faultId: string; kind: FaultKind };
+
+  /** A link was cut or restored by a fault, not by reconfiguration. */
+  LINK_STATE_CHANGED: { linkId: LinkId; enabled: boolean; faultId: string };
+  /** A link's impairments changed — a latency spike or a burst of packet loss. */
+  LINK_CONFIG_CHANGED: {
+    linkId: LinkId;
+    faultId: string;
+    /** True when the change came from a fault ending rather than starting. */
+    restoring: boolean;
+    /** The link's effective settings after the change, with every active fault applied. */
+    lossRate: number;
+    latency: LatencySpec;
+  };
+  PARTITION_STARTED: { partitionId: string; groups: readonly (readonly NodeId[])[] };
+  PARTITION_HEALED: { partitionId: string };
+}
+
+export function validateFault(
+  fault: FaultSpec | undefined,
+  path: string,
+  push: IssueReporter,
+  context: SpecValidationContext,
+  seenIds: Set<string>,
+): void {
+  if (!fault || typeof fault !== 'object') {
+    push(path, 'must be a fault spec');
+    return;
+  }
+  if (fault.id !== undefined) {
+    if (seenIds.has(fault.id)) push(`${path}.id`, `duplicate fault id "${fault.id}"`);
+    seenIds.add(fault.id);
+  }
+  if (fault.at === undefined) push(`${path}.at`, 'is required');
+  checkNonNegative(fault.at, `${path}.at`, push);
+
+  const requireNode = (id: NodeId | undefined, field: string) => {
+    if (typeof id !== 'string' || !context.nodeIds.has(id)) push(`${path}.${field}`, `unknown node "${String(id)}"`);
+  };
+  const requireLink = (id: LinkId | undefined, field: string) => {
+    if (typeof id !== 'string' || !context.linkIds.has(id)) push(`${path}.${field}`, `unknown link "${String(id)}"`);
+  };
+
+  switch (fault.kind) {
+    case 'node_crash':
+      requireNode(fault.nodeId, 'nodeId');
+      checkPositive(fault.recoverAfter, `${path}.recoverAfter`, push, true);
+      return;
+    case 'link_down':
+      requireLink(fault.linkId, 'linkId');
+      checkPositive(fault.restoreAfter, `${path}.restoreAfter`, push, true);
+      return;
+    case 'partition':
+      if (!Array.isArray(fault.groups) || fault.groups.length < 2) {
+        push(`${path}.groups`, 'a partition needs at least two groups');
+        return;
+      }
+      fault.groups.forEach((group, g) => {
+        if (!Array.isArray(group) || group.length === 0) {
+          push(`${path}.groups[${g}]`, 'must be a non-empty array of node ids');
+          return;
+        }
+        group.forEach((id, n) => requireNode(id, `groups[${g}][${n}]`));
+      });
+      checkPositive(fault.healAfter, `${path}.healAfter`, push, true);
+      return;
+    case 'latency_spike':
+      requireLink(fault.linkId, 'linkId');
+      if (fault.latency === undefined) push(`${path}.latency`, 'is required');
+      checkLatency(fault.latency, `${path}.latency`, push);
+      checkPositive(fault.durationMs, `${path}.durationMs`, push, true);
+      return;
+    case 'packet_loss':
+      requireLink(fault.linkId, 'linkId');
+      if (fault.lossRate === undefined) push(`${path}.lossRate`, 'is required');
+      checkProbability(fault.lossRate, `${path}.lossRate`, push);
+      checkPositive(fault.durationMs, `${path}.durationMs`, push, true);
+      return;
+    default:
+      push(`${path}.kind`, `unknown fault kind "${String((fault as { kind: string }).kind)}"`);
   }
 }

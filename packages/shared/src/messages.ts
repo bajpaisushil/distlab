@@ -1,7 +1,22 @@
 import type { MessageId, NodeId, RequestId, SpanId, TraceId } from './ids.js';
 import type { SimTime } from './time.js';
+import type { DataMessageKind, DataMessagePayload } from './protocols/data.js';
+import type { QueueMessageKind, QueueMessagePayload } from './protocols/queue.js';
+import type { ConsensusMessageKind, ConsensusMessagePayload } from './protocols/consensus.js';
+import type { LockMessageKind, LockMessagePayload } from './protocols/locks.js';
 
-export type MessageKind = 'REQUEST' | 'RESPONSE';
+/**
+ * What a message is for. Request/response is the RPC path every node speaks;
+ * the rest are protocol messages owned by individual subsystems (replication,
+ * queues, consensus, locks), each defined in its own protocol file.
+ */
+export type MessageKind =
+  | 'REQUEST'
+  | 'RESPONSE'
+  | DataMessageKind
+  | QueueMessageKind
+  | ConsensusMessageKind
+  | LockMessageKind;
 
 export type MessageStatus = 'in_flight' | 'delivered' | 'dropped';
 
@@ -15,9 +30,25 @@ export type DropReason =
   | 'source_failed';
 
 /** Application-level operation a request carries. Free-form so scenarios can add their own. */
-export type OperationType = 'HTTP_GET' | 'HTTP_POST' | 'DB_READ' | 'DB_WRITE' | 'RPC' | (string & {});
+export type OperationType =
+  | 'HTTP_GET'
+  | 'HTTP_POST'
+  | 'HTTP_PUT'
+  | 'DB_READ'
+  | 'DB_WRITE'
+  | 'RPC'
+  | 'ENQUEUE'
+  | (string & {});
 
-export type ResponseStatus = 'ok' | 'error' | 'rejected' | 'unreachable' | 'timeout';
+export type ResponseStatus =
+  | 'ok'
+  | 'error'
+  | 'rejected'
+  | 'unreachable'
+  | 'timeout'
+  | 'unavailable'
+  | 'circuit_open'
+  | 'not_leader';
 
 export interface RequestBody {
   readonly operation: OperationType;
@@ -34,6 +65,20 @@ export interface RequestBody {
    * from leaking capacity.
    */
   readonly deadlineAt: SimTime;
+  /** Data key for storage operations, chosen by the workload. */
+  readonly key?: string;
+}
+
+/** What a response carries back besides its status. Every field is optional and subsystem-specific. */
+export interface ResponseData {
+  readonly key?: string;
+  /** Version of the key that was read or written. */
+  readonly version?: number;
+  /** A replica answered with a version older than the primary's at that instant. */
+  readonly stale?: boolean;
+  readonly cache?: 'hit' | 'miss';
+  /** Where a non-leader thinks the leader is. */
+  readonly leaderHint?: NodeId;
 }
 
 export interface ResponseBody {
@@ -43,9 +88,16 @@ export interface ResponseBody {
   readonly error?: string;
   /** Node that actually produced the response, which may be deep in the graph. */
   readonly servedBy: NodeId;
+  readonly data?: ResponseData;
 }
 
-export type MessagePayload = RequestBody | ResponseBody;
+export type MessagePayload =
+  | RequestBody
+  | ResponseBody
+  | DataMessagePayload
+  | QueueMessagePayload
+  | ConsensusMessagePayload
+  | LockMessagePayload;
 
 /**
  * A message in flight on the simulated network.
@@ -65,9 +117,13 @@ export interface Message<P extends MessagePayload = MessagePayload> {
   /** Virtual time the network expects to deliver it. */
   readonly deliverAt: SimTime;
   readonly status: MessageStatus;
-  readonly requestId: RequestId;
-  readonly traceId: TraceId;
-  readonly spanId: SpanId;
+  /**
+   * Request correlation. Always present on REQUEST/RESPONSE; protocol traffic
+   * (heartbeats, replication, lock leases) belongs to no client request.
+   */
+  readonly requestId?: RequestId;
+  readonly traceId?: TraceId;
+  readonly spanId?: SpanId;
   readonly parentSpanId?: SpanId;
   /** Hop count from the originating client, starting at 0. */
   readonly hop: number;
@@ -75,8 +131,11 @@ export interface Message<P extends MessagePayload = MessagePayload> {
   readonly duplicateOf?: MessageId;
 }
 
-export type RequestMessage = Message<RequestBody>;
-export type ResponseMessage = Message<ResponseBody>;
+/** Request/response traffic always carries its correlation ids. */
+type Correlated = { readonly requestId: RequestId; readonly traceId: TraceId; readonly spanId: SpanId };
+
+export type RequestMessage = Message<RequestBody> & Correlated;
+export type ResponseMessage = Message<ResponseBody> & Correlated;
 
 export function isRequest(message: Message): message is RequestMessage {
   return message.kind === 'REQUEST';
@@ -87,5 +146,5 @@ export function isResponse(message: Message): message is ResponseMessage {
 }
 
 export function isWriteOperation(operation: OperationType): boolean {
-  return operation === 'DB_WRITE' || operation === 'HTTP_POST';
+  return operation === 'DB_WRITE' || operation === 'HTTP_POST' || operation === 'HTTP_PUT' || operation === 'WRITE';
 }

@@ -85,4 +85,11 @@ export class EventLog {
     this.byId.clear();
     this.dropped = 0;
   }
+
+  /** Replaces the log wholesale — events are immutable, so they are shared, not copied. */
+  restore(entries: readonly SimEvent[], dropped: number): void {
+    this.entries = [...entries];
+    this.byId = new Map(entries.map((e) => [e.id, e]));
+    this.dropped = dropped;
+  }
 }

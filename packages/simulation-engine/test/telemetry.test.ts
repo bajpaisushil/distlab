@@ -16,7 +16,7 @@ describe('metrics', () => {
     expect(snapshot.requests.failed).toBe(log.byType('REQUEST_FAILED').length);
     expect(snapshot.messages.sent).toBe(log.byType('MESSAGE_SENT').length);
     expect(snapshot.messages.dropped).toBe(log.byType('MESSAGE_DROPPED').length);
-    expect(snapshot.database.reads).toBe(log.byType('DB_READ').length);
+    expect(snapshot.modules.data.reads).toBe(log.byType('DB_READ').length);
   });
 
   it('computes latency percentiles from the requests that actually completed', () => {

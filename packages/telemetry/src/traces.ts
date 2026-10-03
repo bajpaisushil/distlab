@@ -99,6 +99,16 @@ export class TraceCollector {
     this.traces.clear();
   }
 
+  /** Deep copy: spans are mutated as they close, so sharing them would leak later state into a checkpoint. */
+  captureState(): readonly Trace[] {
+    return [...this.traces.values()].map(cloneTrace);
+  }
+
+  restoreState(state: readonly Trace[]): void {
+    this.traces.clear();
+    for (const trace of state) this.traces.set(trace.traceId, cloneTrace(trace));
+  }
+
   private onCreated(event: SimEvent<'REQUEST_CREATED'>): void {
     const { traceId, requestId, clientId, operation, spanId } = event.payload;
     const trace: Trace = {
@@ -128,6 +138,8 @@ export class TraceCollector {
   private onReceived(event: SimEvent<'MESSAGE_RECEIVED'>): void {
     const message = event.payload.message;
     if (message.kind !== 'REQUEST') return;
+    // Protocol traffic belongs to no request and so to no trace.
+    if (message.traceId === undefined || message.spanId === undefined) return;
     const trace = this.traces.get(message.traceId);
     if (!trace) return;
     trace.spans.push({
@@ -149,7 +161,7 @@ export class TraceCollector {
 
   private onSent(event: SimEvent<'MESSAGE_SENT'>): void {
     const message = event.payload.message;
-    if (message.kind !== 'RESPONSE') return;
+    if (message.kind !== 'RESPONSE' || message.traceId === undefined) return;
     const trace = this.traces.get(message.traceId);
     if (!trace) return;
     // The first still-open span with this id: a duplicated request opens two,
@@ -180,6 +192,10 @@ export class TraceCollector {
       this.traces.delete(oldest.value);
     }
   }
+}
+
+function cloneTrace(trace: Trace): Trace {
+  return { ...trace, spans: trace.spans.map((span) => ({ ...span, attributes: { ...span.attributes } })) };
 }
 
 function finish(span: Span, at: SimTime, status: SpanStatus): void {

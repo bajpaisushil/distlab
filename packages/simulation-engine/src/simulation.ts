@@ -2,6 +2,7 @@ import {
   IdFactory,
   Rng,
   invariant,
+  type RngState,
   type Duration,
   type EventDraft,
   type EventId,
@@ -19,6 +20,27 @@ export type SimulationStatus = 'idle' | 'running' | 'paused' | 'completed';
 
 export type EventHandler<T extends EventType> = (event: SimEvent<T>) => void;
 export type EventObserver = (event: SimEvent) => void;
+
+/**
+ * Decides whether a dequeued event may run now. Returning false hands the
+ * event to the gate's owner, which must requeue it later — this is how a
+ * paused node's work waits for it to resume without losing its order.
+ */
+export type DispatchGate = (event: SimEvent) => boolean;
+
+/** Plain-data kernel state, for checkpoints. */
+export interface KernelState {
+  readonly now: SimTime;
+  readonly pending: readonly SimEvent[];
+  readonly ids: Record<string, number>;
+  readonly streams: readonly (readonly [string, RngState])[];
+  readonly sequence: number;
+  readonly processed: number;
+  readonly status: SimulationStatus;
+  readonly endReason: SimulationEndReason | undefined;
+  readonly log: readonly SimEvent[];
+  readonly logDropped: number;
+}
 
 export interface SimulationLimits {
   /** Virtual time at which the run ends. */
@@ -70,6 +92,8 @@ export class Simulation implements SimulationContext {
   private state: SimulationStatus = 'idle';
   private endReason: SimulationEndReason | undefined;
   private stopRequested = false;
+  private gate: DispatchGate | undefined;
+  private onGated: ((event: SimEvent) => void) | undefined;
 
   constructor(options: { seed: string | number; limits: SimulationLimits; logCapacity?: number }) {
     this.seed = String(options.seed);
@@ -164,18 +188,46 @@ export class Simulation implements SimulationContext {
     return this.queue.cancel(id);
   }
 
+  /**
+   * Installs a gate consulted before every dispatch. Held events are passed
+   * to `onHeld` and must be returned with `requeue` to run at all.
+   */
+  setDispatchGate(gate: DispatchGate | undefined, onHeld?: (event: SimEvent) => void): void {
+    this.gate = gate;
+    this.onGated = onHeld;
+  }
+
+  /**
+   * Puts a held event back in the queue at a later instant. It keeps its id —
+   * it is the same event, delayed — but takes a new sequence number, so it
+   * runs after anything already scheduled for that instant.
+   */
+  requeue(event: SimEvent, at: SimTime): void {
+    invariant(at >= this.clock.now(), `cannot requeue ${event.id} into the past`);
+    this.queue.push({ ...event, at, seq: this.sequence++ });
+  }
+
   // --- execution ----------------------------------------------------------
 
-  /** Processes exactly one event. Returns undefined when the queue is empty. */
+  /**
+   * Processes exactly one event. Returns undefined when the queue is empty.
+   * Events held by the dispatch gate are not counted; time still moves to them.
+   */
   step(): SimEvent | undefined {
     if (this.state === 'completed') return undefined;
-    const event = this.queue.pop();
-    if (event === undefined) return undefined;
-    this.state = 'running';
-    this.clock.advanceTo(event.at);
-    this.processed += 1;
-    this.dispatch(event);
-    return event;
+    for (;;) {
+      const event = this.queue.pop();
+      if (event === undefined) return undefined;
+      this.state = 'running';
+      this.clock.advanceTo(event.at);
+      if (this.gate && !this.gate(event)) {
+        this.onGated?.(event);
+        continue;
+      }
+      this.processed += 1;
+      this.dispatch(event);
+      return event;
+    }
   }
 
   /** Processes up to `count` events, stopping early if the queue drains. */
@@ -290,6 +342,39 @@ export class Simulation implements SimulationContext {
       endedAt: this.clock.now(),
       hasMore: !this.queue.isEmpty,
     };
+  }
+
+  captureState(): KernelState {
+    return {
+      now: this.clock.now(),
+      pending: this.queue.toSortedArray(),
+      ids: this.ids.snapshot(),
+      streams: [...this.streams.entries()].map(([label, rng]) => [label, rng.state()] as const),
+      sequence: this.sequence,
+      processed: this.processed,
+      status: this.state,
+      endReason: this.endReason,
+      log: [...this.log.all()],
+      logDropped: this.log.droppedCount,
+    };
+  }
+
+  /** Restores a checkpoint into this kernel. Handlers stay as registered. */
+  restoreState(state: KernelState): void {
+    this.clock.reset();
+    this.clock.advanceTo(state.now);
+    this.queue.clear();
+    for (const event of state.pending) this.queue.push(event);
+    this.ids.restore(state.ids);
+    this.streams.clear();
+    for (const [label, rngState] of state.streams) this.streams.set(label, Rng.fromState(rngState));
+    this.sequence = state.sequence;
+    this.processed = state.processed;
+    // A restored run is never mid-dispatch: it resumes from a clean pause.
+    this.state = state.status === 'running' ? 'paused' : state.status;
+    this.endReason = state.endReason;
+    this.stopRequested = false;
+    this.log.restore(state.log, state.logDropped);
   }
 
   /** Clears kernel state. Subsystem state is rebuilt by the owning world. */

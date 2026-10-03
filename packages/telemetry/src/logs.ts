@@ -1,4 +1,5 @@
 import type { EventId, EventType, NodeId, SimEvent, SimTime, TraceId } from '@distlab/shared';
+import { TELEMETRY_MODULES } from './modules/index.js';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -20,10 +21,11 @@ export interface LogRecord {
  * Routine traffic is debug so a busy run does not bury the interesting lines;
  * anything that loses work is an error.
  */
-const EVENT_LEVELS: Partial<Record<EventType, LogLevel>> = {
+const CORE_LEVELS: Partial<Record<EventType, LogLevel>> = {
   SIMULATION_STARTED: 'info',
   SIMULATION_COMPLETED: 'info',
   WORKLOAD_TICK: 'debug',
+  TIMER: 'debug',
   REQUEST_CREATED: 'debug',
   REQUEST_ROUTED: 'debug',
   REQUEST_QUEUED: 'debug',
@@ -32,22 +34,25 @@ const EVENT_LEVELS: Partial<Record<EventType, LogLevel>> = {
   REQUEST_COMPLETED: 'debug',
   MESSAGE_SENT: 'debug',
   MESSAGE_RECEIVED: 'debug',
-  DB_READ: 'debug',
-  DB_WRITE: 'debug',
   REQUEST_REJECTED: 'warn',
   MESSAGE_DUPLICATED: 'warn',
   MESSAGE_DROPPED: 'warn',
   TIMEOUT: 'warn',
   NODE_RECOVERED: 'warn',
-  FAULT_INJECTED: 'warn',
-  FAULT_CLEARED: 'info',
-  LINK_STATE_CHANGED: 'warn',
-  LINK_CONFIG_CHANGED: 'warn',
-  PARTITION_STARTED: 'error',
-  PARTITION_HEALED: 'warn',
   REQUEST_FAILED: 'error',
   NODE_FAILED: 'error',
 };
+
+/** Module levels layered over the core table; a module may only claim its own events. */
+const EVENT_LEVELS: Partial<Record<EventType, LogLevel>> = Object.assign(
+  {},
+  CORE_LEVELS,
+  ...TELEMETRY_MODULES.map((module) => module.levels),
+);
+
+export function levelOf(type: EventType): LogLevel {
+  return EVENT_LEVELS[type] ?? 'info';
+}
 
 /** Structured log derived from the event stream, kept in a bounded ring. */
 export class LogCollector {
@@ -59,7 +64,7 @@ export class LogCollector {
   ) {}
 
   record(event: SimEvent): void {
-    const level = EVENT_LEVELS[event.type] ?? 'info';
+    const level = levelOf(event.type);
     if (LEVEL_ORDER[level] < LEVEL_ORDER[this.minLevel]) return;
     this.records.push({
       t: event.at,
@@ -88,6 +93,14 @@ export class LogCollector {
   clear(): void {
     this.records = [];
   }
+
+  captureState(): readonly LogRecord[] {
+    return [...this.records];
+  }
+
+  restoreState(state: readonly LogRecord[]): void {
+    this.records = [...state];
+  }
 }
 
 /**
@@ -97,6 +110,7 @@ export class LogCollector {
  * is what lets the AI layer later quote a log line as a measured fact.
  */
 export function describe(event: SimEvent): string {
+  // Core and request events are described here; everything else belongs to a module.
   switch (event.type) {
     case 'SIMULATION_STARTED': {
       const p = (event as SimEvent<'SIMULATION_STARTED'>).payload;
@@ -166,37 +180,20 @@ export function describe(event: SimEvent): string {
     }
     case 'NODE_RECOVERED':
       return `${(event as SimEvent<'NODE_RECOVERED'>).payload.nodeId} recovered`;
-    case 'DB_READ': {
-      const p = (event as SimEvent<'DB_READ'>).payload;
-      return `${p.nodeId} read for ${p.requestId} (${round(p.latency)}ms)`;
-    }
-    case 'DB_WRITE': {
-      const p = (event as SimEvent<'DB_WRITE'>).payload;
-      return `${p.nodeId} wrote for ${p.requestId} (${round(p.latency)}ms)`;
-    }
-    case 'FAULT_INJECTED':
-      return `fault ${(event as SimEvent<'FAULT_INJECTED'>).payload.faultId}: ${(event as SimEvent<'FAULT_INJECTED'>).payload.description}`;
-    case 'FAULT_CLEARED': {
-      const p = (event as SimEvent<'FAULT_CLEARED'>).payload;
-      return `fault ${p.faultId} (${p.kind}) cleared`;
-    }
-    case 'LINK_STATE_CHANGED': {
-      const p = (event as SimEvent<'LINK_STATE_CHANGED'>).payload;
-      return `link ${p.linkId} ${p.enabled ? 'restored' : 'cut'} (${p.faultId})`;
-    }
-    case 'LINK_CONFIG_CHANGED': {
-      const p = (event as SimEvent<'LINK_CONFIG_CHANGED'>).payload;
-      return `link ${p.linkId} ${p.restoring ? 'reverted' : 'impaired'}: loss ${(p.lossRate * 100).toFixed(1)}% (${p.faultId})`;
-    }
-    case 'PARTITION_STARTED': {
-      const p = (event as SimEvent<'PARTITION_STARTED'>).payload;
-      return `partition ${p.partitionId}: ${p.groups.map((g) => `{${g.join(', ')}}`).join(' | ')}`;
-    }
-    case 'PARTITION_HEALED':
-      return `partition ${(event as SimEvent<'PARTITION_HEALED'>).payload.partitionId} healed`;
     case 'WORKLOAD_TICK': {
       const p = (event as SimEvent<'WORKLOAD_TICK'>).payload;
       return `workload ${p.workloadId} tick (${p.emitted} emitted)`;
+    }
+    case 'TIMER': {
+      const p = (event as SimEvent<'TIMER'>).payload;
+      return `${p.nodeId} ${p.module} timer "${p.name}" fired`;
+    }
+    default: {
+      for (const module of TELEMETRY_MODULES) {
+        const line = module.describe(event);
+        if (line !== undefined) return line;
+      }
+      return event.type.toLowerCase().replace(/_/g, ' ');
     }
   }
 }

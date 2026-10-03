@@ -1,5 +1,6 @@
 import {
   createNodeRuntimeState,
+  type NodeRuntimeState as NodeState,
   invariant,
   nodeUtilization,
   type NodeId,
@@ -55,6 +56,17 @@ export class NodeRegistry {
     node.state.lastStatusChangeAt = at;
   }
 
+  captureState(): readonly (readonly [NodeId, NodeState])[] {
+    return this.all().map((node) => [node.id, { ...node.state }] as const);
+  }
+
+  restoreState(state: readonly (readonly [NodeId, NodeState])[]): void {
+    for (const [id, saved] of state) {
+      const node = this.nodes.get(id);
+      if (node) Object.assign(node.state, saved);
+    }
+  }
+
   /** A point-in-time copy for the UI, with utilisation folded in. */
   snapshot(elapsed: SimTime): NodeSnapshot[] {
     return this.all().map((node) => ({
@@ -68,6 +80,9 @@ export class NodeRegistry {
       failed: node.state.failed,
       rejected: node.state.rejected,
       utilization: nodeUtilization(node, elapsed),
+      paused: node.state.paused,
+      unavailable: node.state.unavailable,
+      slowdown: node.state.slowdown,
     }));
   }
 }
@@ -83,4 +98,7 @@ export interface NodeSnapshot {
   readonly failed: number;
   readonly rejected: number;
   readonly utilization: number;
+  readonly paused: boolean;
+  readonly unavailable: boolean;
+  readonly slowdown: number;
 }

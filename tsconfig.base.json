@@ -2,7 +2,9 @@
   "$schema": "https://json.schemastore.org/tsconfig",
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022"],
+    "lib": [
+      "ES2022"
+    ],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
@@ -21,10 +23,21 @@
     "noEmit": true,
     "baseUrl": ".",
     "paths": {
-      "@distlab/shared": ["packages/shared/src/index.ts"],
-      "@distlab/network": ["packages/network/src/index.ts"],
-      "@distlab/telemetry": ["packages/telemetry/src/index.ts"],
-      "@distlab/simulation-engine": ["packages/simulation-engine/src/index.ts"]
+      "@distlab/shared": [
+        "packages/shared/src/index.ts"
+      ],
+      "@distlab/network": [
+        "packages/network/src/index.ts"
+      ],
+      "@distlab/telemetry": [
+        "packages/telemetry/src/index.ts"
+      ],
+      "@distlab/simulation-engine": [
+        "packages/simulation-engine/src/index.ts"
+      ],
+      "@distlab/algorithms": [
+        "packages/algorithms/src/index.ts"
+      ]
     }
   }
 }

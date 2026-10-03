@@ -17,7 +17,13 @@ import {
   type SpanId,
   type TraceId,
 } from '@distlab/shared';
-import { Topology } from './topology.js';
+import { Topology, type TopologyState } from './topology.js';
+
+export interface NetworkState {
+  readonly topology: TopologyState;
+  readonly busyUntil: readonly (readonly [string, SimTime])[];
+  readonly stats: NetworkStats;
+}
 
 export interface SendRequest {
   readonly kind: MessageKind;
@@ -26,9 +32,10 @@ export interface SendRequest {
   readonly type: OperationType;
   readonly payload: MessagePayload;
   readonly sizeBytes: number;
-  readonly requestId: RequestId;
-  readonly traceId: TraceId;
-  readonly spanId: SpanId;
+  /** Correlation ids. Request/response traffic has them; protocol traffic may not. */
+  readonly requestId?: RequestId;
+  readonly traceId?: TraceId;
+  readonly spanId?: SpanId;
   readonly parentSpanId?: SpanId;
   readonly hop: number;
   readonly causedBy?: EventId;
@@ -116,12 +123,27 @@ export class SimulatedNetwork {
         type: 'MESSAGE_SENT',
         payload: { message, linkId: link.id },
         nodeId: request.source,
-        traceId: request.traceId,
+        ...(request.traceId !== undefined ? { traceId: request.traceId } : {}),
         ...(request.causedBy !== undefined ? { causedBy: request.causedBy } : {}),
       },
       0,
     );
     return message;
+  }
+
+  captureState(): NetworkState {
+    return {
+      topology: this.topology.captureState(),
+      busyUntil: [...this.busyUntil.entries()],
+      stats: { ...this.stats },
+    };
+  }
+
+  restoreState(state: NetworkState): void {
+    this.topology.restoreState(state.topology);
+    this.busyUntil.clear();
+    for (const [direction, until] of state.busyUntil) this.busyUntil.set(direction, until);
+    Object.assign(this.stats, state.stats);
   }
 
   setLinkEnabled(linkId: LinkId, enabled: boolean): boolean {
@@ -174,23 +196,7 @@ export class SimulatedNetwork {
     this.deliver(message, delay, event.id);
 
     if (rng.bool(link.duplicateRate)) {
-      const copy = this.buildMessage(
-        {
-          kind: message.kind,
-          source: message.source,
-          destination: message.destination,
-          type: message.type,
-          payload: message.payload,
-          sizeBytes: message.sizeBytes,
-          requestId: message.requestId,
-          traceId: message.traceId,
-          spanId: message.spanId,
-          ...(message.parentSpanId !== undefined ? { parentSpanId: message.parentSpanId } : {}),
-          hop: message.hop,
-        },
-        message.createdAt,
-        message.id,
-      );
+      const copy = this.buildMessage(correlationOf(message), message.createdAt, message.id);
       const duplicateDelay =
         this.transmissionDelay(link, direction, copy.sizeBytes) + sampleLatency(link.latency, rng);
       this.stats.duplicated += 1;
@@ -198,7 +204,7 @@ export class SimulatedNetwork {
         {
           type: 'MESSAGE_DUPLICATED',
           payload: { originalId: message.id, duplicateId: copy.id, linkId },
-          traceId: message.traceId,
+          ...(message.traceId !== undefined ? { traceId: message.traceId } : {}),
           causedBy: event.id,
         },
         0,
@@ -240,7 +246,7 @@ export class SimulatedNetwork {
         type: 'MESSAGE_RECEIVED',
         payload: { message: delivered },
         nodeId: message.destination,
-        traceId: message.traceId,
+        ...(message.traceId !== undefined ? { traceId: message.traceId } : {}),
         causedBy,
       },
       deliverAt,
@@ -254,14 +260,14 @@ export class SimulatedNetwork {
         type: 'MESSAGE_DROPPED',
         payload: {
           messageId: message.id,
-          requestId: message.requestId,
+          ...(message.requestId !== undefined ? { requestId: message.requestId } : {}),
           source: message.source,
           destination: message.destination,
           reason,
           ...(linkId !== undefined ? { linkId } : {}),
         },
         nodeId: message.source,
-        traceId: message.traceId,
+        ...(message.traceId !== undefined ? { traceId: message.traceId } : {}),
         ...(causedBy !== undefined ? { causedBy } : {}),
       },
       0,
@@ -280,12 +286,29 @@ export class SimulatedNetwork {
       createdAt,
       deliverAt: createdAt,
       status: 'in_flight',
-      requestId: request.requestId,
-      traceId: request.traceId,
-      spanId: request.spanId,
+      ...(request.requestId !== undefined ? { requestId: request.requestId } : {}),
+      ...(request.traceId !== undefined ? { traceId: request.traceId } : {}),
+      ...(request.spanId !== undefined ? { spanId: request.spanId } : {}),
       ...(request.parentSpanId !== undefined ? { parentSpanId: request.parentSpanId } : {}),
       hop: request.hop,
       ...(duplicateOf !== undefined ? { duplicateOf } : {}),
     };
   }
+}
+
+/** The fields needed to send an identical copy of a message. */
+function correlationOf(message: Message): Omit<SendRequest, 'causedBy'> {
+  return {
+    kind: message.kind,
+    source: message.source,
+    destination: message.destination,
+    type: message.type,
+    payload: message.payload,
+    sizeBytes: message.sizeBytes,
+    ...(message.requestId !== undefined ? { requestId: message.requestId } : {}),
+    ...(message.traceId !== undefined ? { traceId: message.traceId } : {}),
+    ...(message.spanId !== undefined ? { spanId: message.spanId } : {}),
+    ...(message.parentSpanId !== undefined ? { parentSpanId: message.parentSpanId } : {}),
+    hop: message.hop,
+  };
 }

@@ -72,13 +72,15 @@ export class WorkloadGenerator {
     let emitted = this.emitted.get(workload.id) ?? 0;
     const batch = batchSize(workload.arrival);
     for (let i = 0; i < batch && emitted < workload.maxRequests; i++) {
+      const key = this.pickKey(workload);
       this.runtime.beginRequest(
         {
           clientId: workload.clientId,
           workloadId: workload.id,
-          operation: workload.operation,
+          operation: this.pickOperation(workload),
           sizeBytes: workload.sizeBytes,
           deadlineMs: workload.deadlineMs,
+          ...(key !== undefined ? { key } : {}),
         },
         event.id,
       );
@@ -103,6 +105,35 @@ export class WorkloadGenerator {
       },
       nextAt,
     );
+  }
+
+  /** Weighted choice from the workload's mix, on its own stream so it cannot shift arrival times. */
+  private pickOperation(workload: ResolvedWorkloadSpec): string {
+    const mix = workload.mix;
+    if (mix.length === 1) return (mix[0] as { operation: string }).operation;
+    const total = mix.reduce((sum, entry) => sum + entry.weight, 0);
+    let roll = this.context.stream(`workload:${workload.id}:mix`).float() * total;
+    for (const entry of mix) {
+      roll -= entry.weight;
+      if (roll < 0) return entry.operation;
+    }
+    return (mix[mix.length - 1] as { operation: string }).operation;
+  }
+
+  private pickKey(workload: ResolvedWorkloadSpec): string | undefined {
+    if (workload.keys <= 0) return undefined;
+    const rng = this.context.stream(`workload:${workload.id}:keys`);
+    if (workload.hotKeyShare > 0 && rng.bool(workload.hotKeyShare)) return 'key-0';
+    return `key-${rng.int(0, workload.keys)}`;
+  }
+
+  captureState(): readonly (readonly [WorkloadId, number])[] {
+    return [...this.emitted.entries()];
+  }
+
+  restoreState(state: readonly (readonly [WorkloadId, number])[]): void {
+    this.emitted.clear();
+    for (const [id, count] of state) this.emitted.set(id, count);
   }
 
   /** Virtual time until the next arrival, or undefined when the workload is finished. */

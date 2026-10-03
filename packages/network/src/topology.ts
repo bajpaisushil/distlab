@@ -1,5 +1,11 @@
 import type { LinkConfig, LinkId, NodeId, PartitionSpec } from '@distlab/shared';
 
+/** Links are immutable values (updates replace them), so a capture can share them. */
+export interface TopologyState {
+  readonly links: readonly LinkConfig[];
+  readonly partitions: readonly PartitionSpec[];
+}
+
 /**
  * Indexed view of links and partitions.
  *
@@ -109,6 +115,17 @@ export class Topology {
       if (a >= 0 && b >= 0 && a !== b) return true;
     }
     return false;
+  }
+
+  captureState(): TopologyState {
+    return { links: this.allLinks(), partitions: [...this.partitions] };
+  }
+
+  restoreState(state: TopologyState): void {
+    this.links.clear();
+    for (const link of state.links) this.links.set(link.id, link);
+    this.partitions = [...state.partitions];
+    this.index();
   }
 
   private index(): void {

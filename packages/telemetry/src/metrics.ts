@@ -1,4 +1,4 @@
-import { Rng, type SimTime } from '@distlab/shared';
+import { Rng, type RngState, type SimTime } from '@distlab/shared';
 
 /** Monotonic count of something that happened. */
 export class Counter {
@@ -18,6 +18,21 @@ export class Counter {
   byLabel(): Record<string, number> {
     return Object.fromEntries([...this.labels.entries()].sort(([a], [b]) => (a < b ? -1 : 1)));
   }
+
+  captureState(): CounterState {
+    return { value: this.value, labels: [...this.labels.entries()] };
+  }
+
+  restoreState(state: CounterState): void {
+    this.value = state.value;
+    this.labels.clear();
+    for (const [label, count] of state.labels) this.labels.set(label, count);
+  }
+}
+
+export interface CounterState {
+  readonly value: number;
+  readonly labels: readonly (readonly [string, number])[];
 }
 
 /** Last-written value, plus the extremes it reached. */
@@ -43,6 +58,22 @@ export class Gauge {
   get min(): number {
     return this.trough;
   }
+
+  captureState(): GaugeState {
+    return { current: this.current, peak: this.peak, trough: this.trough };
+  }
+
+  restoreState(state: GaugeState): void {
+    this.current = state.current;
+    this.peak = state.peak;
+    this.trough = state.trough;
+  }
+}
+
+export interface GaugeState {
+  readonly current: number;
+  readonly peak: number;
+  readonly trough: number;
 }
 
 export interface Percentiles {
@@ -81,7 +112,7 @@ export class Histogram {
   private sum = 0;
   private minimum = Number.POSITIVE_INFINITY;
   private maximum = Number.NEGATIVE_INFINITY;
-  private readonly rng: Rng;
+  private rng: Rng;
 
   constructor(
     readonly name: string,
@@ -127,6 +158,36 @@ export class Histogram {
     if (!this.sorted) this.sorted = [...this.samples].sort((a, b) => a - b);
     return this.sorted;
   }
+
+  captureState(): HistogramState {
+    return {
+      samples: [...this.samples],
+      observed: this.observed,
+      sum: this.sum,
+      minimum: this.minimum,
+      maximum: this.maximum,
+      rng: this.rng.state(),
+    };
+  }
+
+  restoreState(state: HistogramState): void {
+    this.samples = [...state.samples];
+    this.sorted = undefined;
+    this.observed = state.observed;
+    this.sum = state.sum;
+    this.minimum = state.minimum;
+    this.maximum = state.maximum;
+    this.rng = Rng.fromState(state.rng);
+  }
+}
+
+export interface HistogramState {
+  readonly samples: readonly number[];
+  readonly observed: number;
+  readonly sum: number;
+  readonly minimum: number;
+  readonly maximum: number;
+  readonly rng: RngState;
 }
 
 /** Nearest-rank quantile over an ascending array. */
@@ -172,6 +233,107 @@ export class TimeSeries {
     const scale = 1000 / this.windowMs;
     return this.points().map((point) => ({ t: point.t, value: point.count * scale }));
   }
+
+  /** Mean of recorded values in each window — e.g. average latency per second. */
+  meanPerWindow(): { t: SimTime; value: number }[] {
+    return this.points().map((point) => ({ t: point.t, value: point.count === 0 ? 0 : point.sum / point.count }));
+  }
+
+  captureState(): TimeSeriesState {
+    return [...this.buckets.entries()].map(([index, b]) => [index, b.count, b.sum] as const);
+  }
+
+  restoreState(state: TimeSeriesState): void {
+    this.buckets.clear();
+    for (const [index, count, sum] of state) this.buckets.set(index, { count, sum });
+  }
+}
+
+export type TimeSeriesState = readonly (readonly [number, number, number])[];
+
+export type TimelineValue = number | string | null;
+
+/**
+ * A value that changes at discrete instants — the leader of a cluster, the
+ * holder of a lock, a queue's depth. Stored as change points so a step chart
+ * can be drawn exactly, and so "what was it at time t" has a precise answer.
+ */
+export class Timeline {
+  private changes: { t: SimTime; value: TimelineValue }[] = [];
+
+  record(t: SimTime, value: TimelineValue): void {
+    const last = this.changes[this.changes.length - 1];
+    if (last && last.value === value) return;
+    if (last && last.t === t) {
+      last.value = value;
+      // Collapsing may make it equal to the value before it.
+      const previous = this.changes[this.changes.length - 2];
+      if (previous && previous.value === value) this.changes.pop();
+      return;
+    }
+    this.changes.push({ t, value });
+  }
+
+  points(): readonly { readonly t: SimTime; readonly value: TimelineValue }[] {
+    return this.changes;
+  }
+
+  valueAt(t: SimTime): TimelineValue | undefined {
+    let result: TimelineValue | undefined;
+    for (const change of this.changes) {
+      if (change.t > t) break;
+      result = change.value;
+    }
+    return result;
+  }
+
+  get last(): TimelineValue | undefined {
+    return this.changes[this.changes.length - 1]?.value;
+  }
+
+  captureState(): TimelineState {
+    return this.changes.map((c) => [c.t, c.value] as const);
+  }
+
+  restoreState(state: TimelineState): void {
+    this.changes = state.map(([t, value]) => ({ t, value }));
+  }
+}
+
+export type TimelineState = readonly (readonly [SimTime, TimelineValue])[];
+
+/** A set of string ids that are "currently" something — active faults, open circuits. */
+export class TrackedSet {
+  private readonly items = new Set<string>();
+
+  add(id: string): void {
+    this.items.add(id);
+  }
+
+  delete(id: string): boolean {
+    return this.items.delete(id);
+  }
+
+  has(id: string): boolean {
+    return this.items.has(id);
+  }
+
+  get size(): number {
+    return this.items.size;
+  }
+
+  values(): IterableIterator<string> {
+    return this.items.values();
+  }
+
+  captureState(): readonly string[] {
+    return [...this.items];
+  }
+
+  restoreState(state: readonly string[]): void {
+    this.items.clear();
+    for (const id of state) this.items.add(id);
+  }
 }
 
 /** Named metric instruments, created on first use. */
@@ -180,8 +342,10 @@ export class MetricsRegistry {
   private readonly gauges = new Map<string, Gauge>();
   private readonly histograms = new Map<string, Histogram>();
   private readonly series = new Map<string, TimeSeries>();
+  private readonly timelines = new Map<string, Timeline>();
+  private readonly sets = new Map<string, TrackedSet>();
 
-  constructor(private readonly windowMs = 1000) {}
+  constructor(readonly windowMs = 1000) {}
 
   counter(name: string): Counter {
     return getOrCreate(this.counters, name, () => new Counter());
@@ -199,9 +363,71 @@ export class MetricsRegistry {
     return getOrCreate(this.series, name, () => new TimeSeries(this.windowMs));
   }
 
+  timeline(name: string): Timeline {
+    return getOrCreate(this.timelines, name, () => new Timeline());
+  }
+
+  set(name: string): TrackedSet {
+    return getOrCreate(this.sets, name, () => new TrackedSet());
+  }
+
   histogramNames(): string[] {
     return [...this.histograms.keys()].sort();
   }
+
+  hasHistogram(name: string): boolean {
+    return this.histograms.has(name);
+  }
+
+  /** Names of every instrument of a kind whose name starts with `prefix`, sorted. */
+  names(kind: 'counter' | 'gauge' | 'histogram' | 'series' | 'timeline' | 'set', prefix = ''): string[] {
+    const source = {
+      counter: this.counters,
+      gauge: this.gauges,
+      histogram: this.histograms,
+      series: this.series,
+      timeline: this.timelines,
+      set: this.sets,
+    }[kind] as Map<string, unknown>;
+    return [...source.keys()].filter((name) => name.startsWith(prefix)).sort();
+  }
+
+  captureState(): MetricsState {
+    const capture = <T extends { captureState(): S }, S>(map: Map<string, T>) =>
+      [...map.entries()].map(([name, instrument]) => [name, instrument.captureState()] as const);
+    return {
+      counters: capture(this.counters),
+      gauges: capture(this.gauges),
+      histograms: capture(this.histograms),
+      series: capture(this.series),
+      timelines: capture(this.timelines),
+      sets: capture(this.sets),
+    };
+  }
+
+  restoreState(state: MetricsState): void {
+    this.counters.clear();
+    this.gauges.clear();
+    this.histograms.clear();
+    this.series.clear();
+    this.timelines.clear();
+    this.sets.clear();
+    for (const [name, s] of state.counters) this.counter(name).restoreState(s);
+    for (const [name, s] of state.gauges) this.gauge(name).restoreState(s);
+    for (const [name, s] of state.histograms) this.histogram(name).restoreState(s);
+    for (const [name, s] of state.series) this.timeSeries(name).restoreState(s);
+    for (const [name, s] of state.timelines) this.timeline(name).restoreState(s);
+    for (const [name, s] of state.sets) this.set(name).restoreState(s);
+  }
+}
+
+export interface MetricsState {
+  readonly counters: readonly (readonly [string, CounterState])[];
+  readonly gauges: readonly (readonly [string, GaugeState])[];
+  readonly histograms: readonly (readonly [string, HistogramState])[];
+  readonly series: readonly (readonly [string, TimeSeriesState])[];
+  readonly timelines: readonly (readonly [string, TimelineState])[];
+  readonly sets: readonly (readonly [string, readonly string[]])[];
 }
 
 function getOrCreate<T>(map: Map<string, T>, key: string, create: () => T): T {

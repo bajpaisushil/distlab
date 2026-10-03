@@ -10,6 +10,21 @@ import {
   type SimulationContext,
 } from '@distlab/shared';
 import type { SimulatedNetwork } from '@distlab/network';
+import type { NodeRegistry } from './node-registry.js';
+import type { DispatchGate } from './simulation.js';
+
+/** The slice of the kernel the injector needs to pause nodes. */
+export interface DispatchControl {
+  setDispatchGate(gate: DispatchGate | undefined, onHeld?: (event: SimEvent) => void): void;
+  requeue(event: SimEvent, at: number): void;
+}
+
+export interface FaultInjectorState {
+  readonly crashes: readonly (readonly [NodeId, readonly string[]])[];
+  readonly cuts: readonly (readonly [LinkId, readonly string[]])[];
+  readonly overrides: readonly (readonly [LinkId, readonly LinkOverride[]])[];
+  readonly bases: readonly (readonly [LinkId, LinkBase])[];
+}
 
 type Registrar = <T extends EventType>(type: T, handler: (event: SimEvent<T>) => void) => unknown;
 
@@ -39,21 +54,48 @@ interface LinkBase {
 export class FaultInjector {
   private readonly context: SimulationContext;
   private readonly network: SimulatedNetwork;
+  private readonly registry: NodeRegistry;
+  private readonly control: DispatchControl;
   private readonly faults = new Map<string, ResolvedFaultSpec>();
 
-  private readonly crashes = new Map<NodeId, Set<string>>();
-  private readonly cuts = new Map<LinkId, Set<string>>();
-  private readonly overrides = new Map<LinkId, LinkOverride[]>();
-  private readonly bases = new Map<LinkId, LinkBase>();
+  private crashes = new Map<NodeId, Set<string>>();
+  private cuts = new Map<LinkId, Set<string>>();
+  private overrides = new Map<LinkId, LinkOverride[]>();
+  private bases = new Map<LinkId, LinkBase>();
 
   constructor(options: {
     context: SimulationContext;
     network: SimulatedNetwork;
+    registry: NodeRegistry;
+    control: DispatchControl;
     faults: readonly ResolvedFaultSpec[];
   }) {
     this.context = options.context;
     this.network = options.network;
+    this.registry = options.registry;
+    this.control = options.control;
     for (const fault of options.faults) this.faults.set(fault.id, fault);
+  }
+
+  captureState(): FaultInjectorState {
+    return {
+      crashes: [...this.crashes.entries()].map(([id, set]) => [id, [...set]] as const),
+      cuts: [...this.cuts.entries()].map(([id, set]) => [id, [...set]] as const),
+      overrides: [...this.overrides.entries()].map(([id, stack]) => [id, [...stack]] as const),
+      bases: [...this.bases.entries()],
+    };
+  }
+
+  restoreState(state: FaultInjectorState): void {
+    this.crashes = new Map(state.crashes.map(([id, list]) => [id, new Set(list)]));
+    this.cuts = new Map(state.cuts.map(([id, list]) => [id, new Set(list)]));
+    this.overrides = new Map(state.overrides.map(([id, stack]) => [id, [...stack]]));
+    this.bases = new Map(state.bases);
+  }
+
+  /** Read access for later fault kinds; kept so the constructor contract is stable. */
+  protected get handles(): { registry: NodeRegistry; control: DispatchControl } {
+    return { registry: this.registry, control: this.control };
   }
 
   attach(on: Registrar): void {
