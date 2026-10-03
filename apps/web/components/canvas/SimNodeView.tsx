@@ -24,9 +24,10 @@ type Health = { label: string; tone: 'good' | 'warning' | 'serious' | 'critical'
 export function healthOf(live: NodeSnapshot | undefined, config: NodeConfig): Health {
   if (!live) return { label: 'Idle', tone: 'neutral' };
   if (live.status === 'failed') return { label: 'Down', tone: 'critical' };
-  if (live.paused) return { label: 'Paused', tone: 'warning' };
+  if (live.paused) return { label: 'Frozen', tone: 'serious' };
   if (live.unavailable) return { label: 'Unavailable', tone: 'serious' };
   if (live.slowdown > 1) return { label: `Slow ×${live.slowdown}`, tone: 'warning' };
+  if (live.replicationStalled) return { label: 'Not replicating', tone: 'warning' };
   if (config.queueCapacity > 0 && live.queueDepth >= config.queueCapacity * 0.8) return { label: 'Saturated', tone: 'serious' };
   if (live.inFlight >= config.concurrency && config.concurrency > 0) return { label: 'Busy', tone: 'warning' };
   return { label: 'Healthy', tone: 'good' };
@@ -43,7 +44,8 @@ function SimNodeViewImpl({ data }: NodeProps<SimFlowNode>) {
   const health = healthOf(live, config);
   const occupancy = config.concurrency > 0 && live ? live.inFlight / config.concurrency : 0;
   const isClient = spec.type === 'client';
-  const classes = ['sim-node', selected ? 'selected' : '', live?.status === 'failed' ? 'failed' : '', live?.paused ? 'paused' : '']
+  const degraded = live !== undefined && (live.unavailable || live.slowdown > 1 || live.replicationStalled);
+  const classes = ['sim-node', selected ? 'selected' : '', live?.status === 'failed' ? 'failed' : '', live?.paused ? 'paused' : '', degraded ? 'degraded' : '']
     .filter(Boolean)
     .join(' ');
 

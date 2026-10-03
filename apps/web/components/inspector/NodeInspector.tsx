@@ -53,6 +53,18 @@ export function NodeInspector({ id }: { id: NodeId }) {
               >
                 <Icon name="bolt" size={13} /> Crash now
               </button>
+            ) : null}
+            {node.type !== 'client' ? (
+              <button
+                className="btn"
+                onClick={() => {
+                  const faultId = lab.addFault({ kind: 'node_pause', at: Math.round(now), nodeId: id, durationMs: 1500 });
+                  lab.select({ kind: 'fault', id: faultId });
+                }}
+                title="Freeze the process for 1.5s from the current moment — a stop-the-world GC pause"
+              >
+                Freeze
+              </button>
             ) : (
               <button className="btn" onClick={() => lab.select({ kind: 'workload', id: lab.addWorkload(id) })}>
                 <Icon name="plus" size={13} /> Add workload

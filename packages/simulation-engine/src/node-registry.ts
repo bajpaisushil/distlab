@@ -83,6 +83,7 @@ export class NodeRegistry {
       paused: node.state.paused,
       unavailable: node.state.unavailable,
       slowdown: node.state.slowdown,
+      replicationStalled: node.state.replicationStalled,
     }));
   }
 }
@@ -101,4 +102,5 @@ export interface NodeSnapshot {
   readonly paused: boolean;
   readonly unavailable: boolean;
   readonly slowdown: number;
+  readonly replicationStalled: boolean;
 }

@@ -20,7 +20,7 @@ export function ScenarioInspector() {
     const form = FAULT_FORMS.find((f) => f.kind === faultKind)!;
     const firstServer = spec.nodes.find((n) => n.type !== 'client')?.id;
     const firstLink = spec.links[0] ? linkId(spec.links[0]) : undefined;
-    let fault = form.create(Math.round(at), firstServer, firstLink);
+    let fault = form.create(Math.round(at), firstServer, firstLink, spec);
     if (!fault && faultKind === 'partition' && spec.nodes.length >= 2) {
       const half = Math.ceil(spec.nodes.length / 2);
       fault = {

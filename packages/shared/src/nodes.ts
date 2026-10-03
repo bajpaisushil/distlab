@@ -121,6 +121,8 @@ export interface NodeRuntimeState {
   slowdown: number;
   /** Up, but refusing work — a database that rejects connections. */
   unavailable: boolean;
+  /** A replica that has stopped applying replication; it keeps serving what it has. */
+  replicationStalled: boolean;
   /**
    * Increments every time the node crashes. Timers and callbacks remember the
    * incarnation they were armed in, so nothing from before a crash can fire
@@ -151,6 +153,7 @@ export function createNodeRuntimeState(status: NodeStatus = 'healthy'): NodeRunt
     paused: false,
     slowdown: 1,
     unavailable: false,
+    replicationStalled: false,
     incarnation: 0,
   };
 }

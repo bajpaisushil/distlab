@@ -2,6 +2,7 @@ import {
   sampleLatency,
   type DropReason,
   type EventId,
+  type LatencySpec,
   type LinkConfig,
   type LinkId,
   type Message,
@@ -23,6 +24,7 @@ export interface NetworkState {
   readonly topology: TopologyState;
   readonly busyUntil: readonly (readonly [string, SimTime])[];
   readonly stats: NetworkStats;
+  readonly nodeDelays?: readonly (readonly [NodeId, LatencySpec])[];
 }
 
 export interface SendRequest {
@@ -90,6 +92,7 @@ export class SimulatedNetwork {
   private readonly isNodeUp: (id: NodeId) => boolean;
   /** Per direction: when the link finishes transmitting what it already holds. */
   private readonly busyUntil = new Map<string, SimTime>();
+  private nodeDelays = new Map<NodeId, LatencySpec>();
 
   constructor(options: NetworkOptions) {
     this.context = options.context;
@@ -136,6 +139,7 @@ export class SimulatedNetwork {
       topology: this.topology.captureState(),
       busyUntil: [...this.busyUntil.entries()],
       stats: { ...this.stats },
+      nodeDelays: [...this.nodeDelays.entries()],
     };
   }
 
@@ -144,6 +148,13 @@ export class SimulatedNetwork {
     this.busyUntil.clear();
     for (const [direction, until] of state.busyUntil) this.busyUntil.set(direction, until);
     Object.assign(this.stats, state.stats);
+    this.nodeDelays = new Map(state.nodeDelays ?? []);
+  }
+
+  /** Extra delay on every message to or from `nodeId` — a congested host. Undefined clears it. */
+  setNodeDelay(nodeId: NodeId, delay: LatencySpec | undefined): void {
+    if (delay === undefined) this.nodeDelays.delete(nodeId);
+    else this.nodeDelays.set(nodeId, delay);
   }
 
   setLinkEnabled(linkId: LinkId, enabled: boolean): boolean {
@@ -183,7 +194,7 @@ export class SimulatedNetwork {
 
     const direction = `${linkId}|${message.source}->${message.destination}`;
     const transmit = this.transmissionDelay(link, direction, message.sizeBytes);
-    let delay = transmit + sampleLatency(link.latency, rng);
+    let delay = transmit + sampleLatency(link.latency, rng) + this.hostDelay(message);
 
     const reordered = rng.bool(link.reorderRate);
     if (reordered) {
@@ -211,6 +222,19 @@ export class SimulatedNetwork {
       );
       this.deliver(copy, duplicateDelay, event.id);
     }
+  }
+
+  /**
+   * Delay added at congested hosts. Drawn from each host's own stream, so a
+   * delay fault on one node leaves every link's sequence of luck untouched.
+   */
+  private hostDelay(message: Message): number {
+    let extra = 0;
+    for (const host of [message.source, message.destination]) {
+      const delay = this.nodeDelays.get(host);
+      if (delay !== undefined) extra += sampleLatency(delay, this.context.stream(`network:host:${host}`));
+    }
+    return extra;
   }
 
   /** Reasons a link refuses to carry a message, checked in order of specificity. */

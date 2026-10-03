@@ -27,7 +27,7 @@ const CONTEXT_TYPES = new Set([
   'LINK_CONFIG_CHANGED',
   'NODE_PAUSED',
   'NODE_RESUMED',
-  'NODE_DEGRADED',
+  'NODE_CONDITION_CHANGED',
   'FAULT_INJECTED',
 ]);
 
@@ -172,13 +172,22 @@ function rootCause({
       };
     }
 
-    const pause = relevantContext.find((e) => (e.type as string) === 'NODE_PAUSED');
+    const pause = relevantContext.find((e) => e.type === 'NODE_PAUSED') as SimEvent<'NODE_PAUSED'> | undefined;
     if (pause) {
+      const who = label(pause.payload.nodeId);
+      const resumed = relevantContext.find(
+        (e) => e.type === 'NODE_RESUMED' && (e as SimEvent<'NODE_RESUMED'>).payload.nodeId === pause.payload.nodeId && e.at >= pause.at,
+      ) as SimEvent<'NODE_RESUMED'> | undefined;
       return {
-        summary: `A node on the request's path was paused at ${at(pause.at)}; it held the request without answering until the deadline passed.`,
-        facts: [measured(`A pause began at ${at(pause.at)}.`, pause.id)],
-        interpretation: ['To its callers, a paused node is indistinguishable from a very slow network.'],
-        suggestions: [],
+        summary: `${who} froze at ${at(pause.at)} while the request depended on it; it held the request without doing anything until the deadline passed.`,
+        facts: [
+          measured(`${who} froze at ${at(pause.at)}.`, pause.id),
+          ...(resumed
+            ? [measured(`It resumed at ${at(resumed.at)} after ${ms(resumed.payload.pausedForMs)}, with ${resumed.payload.heldEvents} events waiting.`, resumed.id)]
+            : []),
+        ],
+        interpretation: ['To its callers, a frozen node is indistinguishable from a crashed one or a very slow network — until it wakes up and carries on.'],
+        suggestions: ['A shorter call timeout with a retry to another instance would route around the freeze.'],
       };
     }
 

@@ -48,6 +48,13 @@ interface ReplicaState {
   readonly appliedLsns: Set<number>;
   /** Ordered mode: records waiting for an earlier one. In memory; lost in a crash. */
   buffer: Map<number, ReplicationRecord>;
+  /** Received while replication was stalled, applied when it resumes. In memory; lost in a crash. */
+  stalled: StalledRecord[];
+}
+
+interface StalledRecord {
+  readonly primaryId: NodeId;
+  readonly record: ReplicationRecord;
 }
 
 interface SyncWait {
@@ -91,7 +98,10 @@ interface DataState {
       applied: (readonly [RequestId, { key: string; version: number }])[];
     },
   ])[];
-  readonly replicas: readonly (readonly [NodeId, { appliedThrough: number; appliedLsns: number[]; buffer: ReplicationRecord[] }])[];
+  readonly replicas: readonly (readonly [
+    NodeId,
+    { appliedThrough: number; appliedLsns: number[]; buffer: ReplicationRecord[]; stalled?: StalledRecord[] },
+  ])[];
   readonly syncWaits: readonly (Omit<SyncWait, 'acks'> & { readonly acks: readonly NodeId[] })[];
   readonly caches: readonly (readonly [
     NodeId,
@@ -158,7 +168,7 @@ export function createDataPlane(services: ModuleServices): DataPlane {
   const replicaOf = (id: NodeId): ReplicaState => {
     let state = replicas.get(id);
     if (!state) {
-      state = { appliedThrough: 0, appliedLsns: new Set(), buffer: new Map() };
+      state = { appliedThrough: 0, appliedLsns: new Set(), buffer: new Map(), stalled: [] };
       replicas.set(id, state);
     }
     return state;
@@ -332,6 +342,18 @@ export function createDataPlane(services: ModuleServices): DataPlane {
       version: Number(data.version),
       writtenAt: Number(data.writtenAt),
     };
+    if (replica.state.replicationStalled) {
+      // The apply thread is stuck: the record waits, unacknowledged, and the replica serves what it already has.
+      const state = replicaOf(replica.id);
+      if (!state.stalled.some((s) => s.record.lsn === record.lsn && s.primaryId === primaryId)) {
+        state.stalled.push({ primaryId, record });
+      }
+      return;
+    }
+    applyRecord(replica, primaryId, record, event.id);
+  };
+
+  const applyRecord = (replica: SimNode, primaryId: NodeId, record: ReplicationRecord, causedBy: EventId) => {
     const state = replicaOf(replica.id);
     const store = storeOf(replica.id);
     const primaryLsn = primaryOf(primaryId).lsn;
@@ -342,7 +364,7 @@ export function createDataPlane(services: ModuleServices): DataPlane {
         services.emit(
           'VERSION_REGRESSION',
           { replicaId: replica.id, key: r.key, fromVersion: current.version, toVersion: r.version, lsn: r.lsn },
-          { nodeId: replica.id, causedBy: event.id },
+          { nodeId: replica.id, causedBy },
         );
       }
       store.set(r.key, { version: r.version, writtenAt: r.writtenAt });
@@ -357,7 +379,7 @@ export function createDataPlane(services: ModuleServices): DataPlane {
           lagMs: now() - r.writtenAt,
           behindRecords: Math.max(0, primaryLsn - Math.max(state.appliedThrough, r.lsn)),
         },
-        { nodeId: replica.id, causedBy: event.id },
+        { nodeId: replica.id, causedBy },
       );
     };
 
@@ -387,7 +409,7 @@ export function createDataPlane(services: ModuleServices): DataPlane {
       payload: ack,
       sizeBytes: 64,
       hop: 0,
-      causedBy: event.id,
+      causedBy,
     });
   };
 
@@ -535,7 +557,18 @@ export function createDataPlane(services: ModuleServices): DataPlane {
     messageKinds: ['REPLICATE', 'REPLICATE_ACK'],
     servesNodeTypes: [],
 
-    attach() {},
+    attach(on) {
+      // A stalled replica catches up the moment it unsticks, in the order records arrived.
+      on('NODE_CONDITION_CHANGED', (event) => {
+        if (event.payload.replicationStalled) return;
+        const replica = services.registry.get(event.payload.nodeId);
+        const state = replicas.get(event.payload.nodeId);
+        if (!replica || !state || state.stalled.length === 0 || replica.state.status === 'failed') return;
+        const backlog = state.stalled;
+        state.stalled = [];
+        for (const { primaryId, record } of backlog) applyRecord(replica, primaryId, record, event.id);
+      });
+    },
 
     onMessage(node, message, event) {
       if (message.kind === 'REPLICATE' && node.type === 'replica') onReplicate(node, message, event);
@@ -555,7 +588,10 @@ export function createDataPlane(services: ModuleServices): DataPlane {
       const primary = primaries.get(node.id);
       if (primary) primary.retransmitTimer = undefined;
       const replica = replicas.get(node.id);
-      if (replica) replica.buffer = new Map();
+      if (replica) {
+        replica.buffer = new Map();
+        replica.stalled = [];
+      }
       syncWaits = syncWaits.filter((w) => w.primaryId !== node.id);
       caches.delete(node.id);
     },
@@ -629,7 +665,12 @@ export function createDataPlane(services: ModuleServices): DataPlane {
         ]),
         replicas: [...replicas.entries()].map(([id, r]) => [
           id,
-          { appliedThrough: r.appliedThrough, appliedLsns: [...r.appliedLsns], buffer: [...r.buffer.values()] },
+          {
+            appliedThrough: r.appliedThrough,
+            appliedLsns: [...r.appliedLsns],
+            buffer: [...r.buffer.values()],
+            stalled: r.stalled.map((x) => ({ ...x })),
+          },
         ]),
         syncWaits: syncWaits.map((w) => ({ ...w, acks: [...w.acks] })),
         caches: [...caches.entries()].map(([id, c]) => [
@@ -660,7 +701,12 @@ export function createDataPlane(services: ModuleServices): DataPlane {
       replicas = new Map(
         (state.replicas ?? []).map(([id, r]) => [
           id,
-          { appliedThrough: r.appliedThrough, appliedLsns: new Set(r.appliedLsns), buffer: new Map(r.buffer.map((x) => [x.lsn, x])) },
+          {
+            appliedThrough: r.appliedThrough,
+            appliedLsns: new Set(r.appliedLsns),
+            buffer: new Map(r.buffer.map((x) => [x.lsn, x])),
+            stalled: (r.stalled ?? []).map((x) => ({ ...x })),
+          },
         ]),
       );
       syncWaits = (state.syncWaits ?? []).map((w) => ({ ...w, acks: new Set(w.acks) }));
