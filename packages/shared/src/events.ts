@@ -1,4 +1,6 @@
 import type { EventId, LinkId, MessageId, NodeId, RequestId, SpanId, TraceId, WorkloadId } from './ids.js';
+import type { FaultKind } from './faults.js';
+import type { LatencySpec } from './latency.js';
 import type { DropReason, Message, OperationType, ResponseStatus } from './messages.js';
 import type { SimTime } from './time.js';
 
@@ -29,6 +31,12 @@ export type EventType =
   | 'TIMEOUT'
   | 'NODE_FAILED'
   | 'NODE_RECOVERED'
+  | 'FAULT_INJECTED'
+  | 'FAULT_CLEARED'
+  | 'LINK_STATE_CHANGED'
+  | 'LINK_CONFIG_CHANGED'
+  | 'PARTITION_STARTED'
+  | 'PARTITION_HEALED'
   | 'DB_READ'
   | 'DB_WRITE';
 
@@ -103,6 +111,26 @@ export interface EventPayloadMap {
 
   NODE_FAILED: { nodeId: NodeId; reason: string };
   NODE_RECOVERED: { nodeId: NodeId };
+
+  /** A scheduled fault took effect. Its concrete consequences follow as their own events. */
+  FAULT_INJECTED: { faultId: string; kind: FaultKind; description: string };
+  /** A scheduled fault's duration ended. */
+  FAULT_CLEARED: { faultId: string; kind: FaultKind };
+
+  /** A link was cut or restored by a fault, not by reconfiguration. */
+  LINK_STATE_CHANGED: { linkId: LinkId; enabled: boolean; faultId: string };
+  /** A link's impairments changed — a latency spike or a burst of packet loss. */
+  LINK_CONFIG_CHANGED: {
+    linkId: LinkId;
+    faultId: string;
+    /** True when the change came from a fault ending rather than starting. */
+    restoring: boolean;
+    /** The link's effective settings after the change, with every active fault applied. */
+    lossRate: number;
+    latency: LatencySpec;
+  };
+  PARTITION_STARTED: { partitionId: string; groups: readonly (readonly NodeId[])[] };
+  PARTITION_HEALED: { partitionId: string };
 
   DB_READ: { nodeId: NodeId; requestId: RequestId; latency: number };
   DB_WRITE: { nodeId: NodeId; requestId: RequestId; latency: number };

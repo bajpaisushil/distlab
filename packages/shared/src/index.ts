@@ -1,6 +1,7 @@
 export * from './assert.js';
 export * from './context.js';
 export * from './events.js';
+export * from './faults.js';
 export * from './ids.js';
 export * from './latency.js';
 export * from './messages.js';

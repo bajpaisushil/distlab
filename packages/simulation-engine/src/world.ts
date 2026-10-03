@@ -8,6 +8,7 @@ import {
 } from '@distlab/shared';
 import { SimulatedNetwork } from '@distlab/network';
 import { TelemetryCollector, type TelemetryOptions, type TelemetrySnapshot } from '@distlab/telemetry';
+import { FaultInjector } from './fault-injector.js';
 import { NodeRegistry } from './node-registry.js';
 import { NodeRuntime } from './node-runtime.js';
 import { WorkloadGenerator } from './workload.js';
@@ -40,6 +41,7 @@ export class SimulationWorld {
   readonly network: SimulatedNetwork;
   readonly runtime: NodeRuntime;
   readonly workload: WorkloadGenerator;
+  readonly faults: FaultInjector;
   readonly telemetry: TelemetryCollector;
 
   private started = false;
@@ -70,11 +72,18 @@ export class SimulationWorld {
       workloads: spec.workloads,
     });
 
+    this.faults = new FaultInjector({
+      context: this.simulation,
+      network: this.network,
+      faults: spec.faults,
+    });
+
     // Registration order is part of the determinism contract.
     const on = this.simulation.on.bind(this.simulation);
     this.network.attach(on);
     this.runtime.attach(on);
     this.workload.attach(on);
+    this.faults.attach(on);
 
     this.telemetry = new TelemetryCollector(options.telemetry ?? {});
     this.simulation.observe((event) => this.telemetry.observe(event));

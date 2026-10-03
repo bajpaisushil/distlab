@@ -1,6 +1,7 @@
 export * from './clock.js';
 export * from './event-log.js';
 export * from './event-queue.js';
+export * from './fault-injector.js';
 export * from './node-registry.js';
 export * from './node-runtime.js';
 export * from './routing.js';

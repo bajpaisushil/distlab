@@ -1,5 +1,6 @@
 import type { LinkId, NodeId, WorkloadId } from './ids.js';
 import type { LatencySpec } from './latency.js';
+import type { FaultSpec } from './faults.js';
 import type { LinkConfig, PartitionSpec } from './network-types.js';
 import type { NodeConfig, NodeStatus, NodeType } from './nodes.js';
 import type { OperationType } from './messages.js';
@@ -69,7 +70,10 @@ export interface SimulationSpec {
   nodes: NodeSpec[];
   links: LinkSpec[];
   workloads: WorkloadSpec[];
+  /** Partitions active from the first instant of the run. */
   partitions?: PartitionSpec[];
+  /** Faults scheduled to happen partway through the run. */
+  faults?: FaultSpec[];
 }
 
 export interface ResolvedNodeSpec {
@@ -97,7 +101,10 @@ export interface ResolvedSpec {
   readonly links: readonly LinkConfig[];
   readonly workloads: readonly ResolvedWorkloadSpec[];
   readonly partitions: readonly PartitionSpec[];
+  readonly faults: readonly ResolvedFaultSpec[];
 }
+
+export type ResolvedFaultSpec = FaultSpec & { readonly id: string };
 
 export const DEFAULT_DURATION_MS = 60_000;
 export const DEFAULT_MAX_EVENTS = 1_000_000;
@@ -248,7 +255,84 @@ export function validateSimulationSpec(input: unknown): ValidationResult {
     }
   }
 
+  if (spec.faults !== undefined) {
+    if (!Array.isArray(spec.faults)) {
+      push('faults', 'must be an array');
+    } else {
+      const faultIds = new Set<string>();
+      spec.faults.forEach((fault, i) => {
+        validateFault(fault, `faults[${i}]`, nodeIds, linkIds, faultIds, push);
+      });
+    }
+  }
+
   return { valid: errors.length === 0, errors };
+}
+
+function validateFault(
+  fault: FaultSpec | undefined,
+  path: string,
+  nodeIds: ReadonlySet<NodeId>,
+  linkIds: ReadonlySet<LinkId>,
+  seen: Set<string>,
+  push: Push,
+): void {
+  if (!fault || typeof fault !== 'object') {
+    push(path, 'must be a fault spec');
+    return;
+  }
+  if (fault.id !== undefined) {
+    if (seen.has(fault.id)) push(`${path}.id`, `duplicate fault id "${fault.id}"`);
+    seen.add(fault.id);
+  }
+  checkNonNegative(fault.at, `${path}.at`, push);
+  if (fault.at === undefined) push(`${path}.at`, 'is required');
+
+  const requireNode = (id: NodeId | undefined, field: string) => {
+    if (typeof id !== 'string' || !nodeIds.has(id)) push(`${path}.${field}`, `unknown node "${String(id)}"`);
+  };
+  const requireLink = (id: LinkId | undefined, field: string) => {
+    if (typeof id !== 'string' || !linkIds.has(id)) push(`${path}.${field}`, `unknown link "${String(id)}"`);
+  };
+
+  switch (fault.kind) {
+    case 'node_crash':
+      requireNode(fault.nodeId, 'nodeId');
+      checkPositive(fault.recoverAfter, `${path}.recoverAfter`, push, true);
+      return;
+    case 'link_down':
+      requireLink(fault.linkId, 'linkId');
+      checkPositive(fault.restoreAfter, `${path}.restoreAfter`, push, true);
+      return;
+    case 'partition':
+      if (!Array.isArray(fault.groups) || fault.groups.length < 2) {
+        push(`${path}.groups`, 'a partition needs at least two groups');
+        return;
+      }
+      fault.groups.forEach((group, g) => {
+        if (!Array.isArray(group) || group.length === 0) {
+          push(`${path}.groups[${g}]`, 'must be a non-empty array of node ids');
+          return;
+        }
+        group.forEach((id, n) => requireNode(id, `groups[${g}][${n}]`));
+      });
+      checkPositive(fault.healAfter, `${path}.healAfter`, push, true);
+      return;
+    case 'latency_spike':
+      requireLink(fault.linkId, 'linkId');
+      checkLatency(fault.latency, `${path}.latency`, push);
+      if (fault.latency === undefined) push(`${path}.latency`, 'is required');
+      checkPositive(fault.durationMs, `${path}.durationMs`, push, true);
+      return;
+    case 'packet_loss':
+      requireLink(fault.linkId, 'linkId');
+      checkProbability(fault.lossRate, `${path}.lossRate`, push);
+      if (fault.lossRate === undefined) push(`${path}.lossRate`, 'is required');
+      checkPositive(fault.durationMs, `${path}.durationMs`, push, true);
+      return;
+    default:
+      push(`${path}.kind`, `unknown fault kind "${String((fault as { kind: string }).kind)}"`);
+  }
 }
 
 /** Applies type defaults and derived ids so the engine only ever sees complete configuration. */
@@ -294,6 +378,7 @@ export function resolveSimulationSpec(spec: SimulationSpec): ResolvedSpec {
     links,
     workloads,
     partitions: spec.partitions ?? [],
+    faults: (spec.faults ?? []).map((fault, index) => ({ ...fault, id: fault.id ?? `fault-${index + 1}` })),
   };
 }
 
