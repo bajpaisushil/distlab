@@ -56,6 +56,14 @@ const NODE_FIELDS = new Set([
   'retry',
   'circuitBreaker',
   'bulkheads',
+  // data
+  'readPreference',
+  'replicaOf',
+  'replicationDelay',
+  'replicaApply',
+  'replication',
+  'idempotentWrites',
+  'cache',
 ]);
 
 const LINK_FIELDS = new Set([

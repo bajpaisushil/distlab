@@ -78,6 +78,14 @@ export function addNode(
   const node: NodeSpec = { id, type, label: count > 1 ? `${NODE_LABELS[type]} ${count}` : NODE_LABELS[type] };
   const next: SimulationSpec = { ...spec, nodes: [...spec.nodes, node] };
   if (position) next.layout = { ...spec.layout, [id]: position };
+  // A replica copies something: attach it to the first database, linked, so it works at once.
+  if (type === 'replica') {
+    const primary = spec.nodes.find((n) => n.type === 'database');
+    if (primary) {
+      next.nodes = next.nodes.map((n) => (n.id === id ? { ...n, config: { replicaOf: primary.id, replicationDelay: 50 } } : n));
+      next.links = [...spec.links, { id: uniqueId(linkIdFor(primary.id, id), spec.links.map(linkId)), from: primary.id, to: id, latency: 10 }];
+    }
+  }
   // A client with nothing to send is inert; give it a modest default workload.
   if (type === 'client') {
     next.workloads = [

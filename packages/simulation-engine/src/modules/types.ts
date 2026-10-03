@@ -140,6 +140,12 @@ export interface DataPlane extends SimModule {
   serve(request: ServeRequest): ServeDecision;
   /** Narrows routing candidates — writes only to primaries, reads by read preference. */
   filterCandidates(node: SimNode, body: RequestBody, candidates: readonly SimNode[]): readonly SimNode[];
+  /**
+   * Work at `node` is finished with, for any reason — answered, timed out,
+   * rejected or lost in a crash. Lets the data plane drop bookkeeping it keyed
+   * on the work, such as a cache fill other requests are waiting on.
+   */
+  onWorkReleased(node: SimNode, workId: MessageId): void;
   /** A forwarded request's response arrived, before it is relayed upstream. Returns data to attach. */
   onDownstreamResponse(
     node: SimNode,

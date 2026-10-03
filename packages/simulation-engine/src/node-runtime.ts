@@ -935,6 +935,7 @@ export class NodeRuntime {
         this.routing.onOutcome(node, item.call.target, this.context.now() - item.call.sentAt, false);
       }
     }
+    for (const workId of [...worker.work.keys()]) this.data.onWorkReleased(node, workId);
     worker.work.clear();
     worker.outbound.clear();
     worker.waiting.length = 0;
@@ -1082,6 +1083,7 @@ export class NodeRuntime {
     this.cancelCallTimers(call);
     this.context.cancel(item.timeoutEventId);
     worker.work.delete(item.workId);
+    this.data.onWorkReleased(node, item.workId);
     this.pump(node, worker);
   }
 

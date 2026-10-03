@@ -12,6 +12,8 @@ export interface SpecValidationContext {
   readonly linkIds: ReadonlySet<LinkId>;
   /** Resolved link endpoints, ids already derived. */
   readonly links: readonly { readonly id: LinkId; readonly from: NodeId; readonly to: NodeId }[];
+  /** The node whose configuration is being validated, when validating node config. */
+  readonly self?: { readonly id: NodeId; readonly type: NodeType };
 }
 
 export function checkLatency(value: LatencySpec | undefined, path: string, push: IssueReporter): void {

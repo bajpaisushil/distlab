@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import type { SimulationSpec } from '@distlab/shared';
 import { applyExperiment, describeChange, type ExperimentChange } from '@distlab/scenarios';
 import { useLab } from '@/lib/store';
 import { runInBackground } from '@/lib/engine/batch';
@@ -9,38 +10,97 @@ import { NumberField, SelectField } from '@/components/ui/fields';
 import { Icon } from '@/components/ui/icons';
 import { RunComparison } from './RunResults';
 
-type Preset = { label: string; question: string; changes: (ctx: PresetContext) => ExperimentChange[] | undefined };
-type PresetContext = { db?: string; firstApi?: string; balancer?: string; client?: string; duration: number };
+type Preset = { label: string; question: string; changes: (spec: SimulationSpec) => ExperimentChange[] | undefined };
+
+const first = (spec: SimulationSpec, ...types: string[]) => spec.nodes.find((n) => types.includes(n.type));
+const all = (spec: SimulationSpec, type: string) => spec.nodes.filter((n) => n.type === type);
 
 const PRESETS: readonly Preset[] = [
   { label: 'Traffic doubles', question: 'What happens if traffic doubles?', changes: () => [{ kind: 'scale_traffic', factor: 2 }] },
   {
     label: 'Database latency 2s',
     question: 'What happens if database latency becomes 2 seconds?',
-    changes: ({ db }) => (db ? [{ kind: 'set_node', nodeId: db, field: 'readLatency', value: 2000 }, { kind: 'set_node', nodeId: db, field: 'writeLatency', value: 2000 }] : undefined),
+    changes: (spec) => {
+      const db = first(spec, 'database');
+      return db
+        ? [
+            { kind: 'set_node', nodeId: db.id, field: 'readLatency', value: 2000 },
+            { kind: 'set_node', nodeId: db.id, field: 'writeLatency', value: 2000 },
+          ]
+        : undefined;
+    },
   },
   {
     label: 'A server fails',
     question: 'What happens if a server fails midway?',
-    changes: ({ firstApi, duration }) =>
-      firstApi ? [{ kind: 'add_fault', fault: { kind: 'node_crash', at: Math.round(duration / 3), nodeId: firstApi } }] : undefined,
+    changes: (spec) => {
+      const server = first(spec, 'api', 'service');
+      return server ? [{ kind: 'add_fault', fault: { kind: 'node_crash', at: Math.round((spec.durationMs ?? 20_000) / 3), nodeId: server.id } }] : undefined;
+    },
   },
   { label: 'Packet loss 20%', question: 'What happens if packet loss becomes 20%?', changes: () => [{ kind: 'set_all_links', field: 'lossRate', value: 0.2 }] },
   {
     label: 'Least connections',
     question: 'What happens if the balancer routes by least connections instead?',
-    changes: ({ balancer }) => (balancer ? [{ kind: 'set_node', nodeId: balancer, field: 'routing', value: 'least_connections' }] : undefined),
+    changes: (spec) => {
+      const lb = first(spec, 'load_balancer', 'gateway');
+      return lb ? [{ kind: 'set_node', nodeId: lb.id, field: 'routing', value: 'least_connections' }] : undefined;
+    },
   },
   {
     label: 'Clients get a circuit breaker',
     question: 'What happens if the clients stop calling a dependency that keeps failing?',
-    changes: ({ client }) =>
-      client
+    changes: (spec) => {
+      const client = first(spec, 'client');
+      return client
         ? [
-            { kind: 'set_node', nodeId: client, field: 'circuitBreaker', value: { failureThreshold: 10, cooldownMs: 2000 } },
-            { kind: 'set_node', nodeId: client, field: 'retry', value: { maxRetries: 2, backoff: 'exponential', baseDelayMs: 300, jitter: 'full' } },
+            { kind: 'set_node', nodeId: client.id, field: 'circuitBreaker', value: { failureThreshold: 10, cooldownMs: 2000 } },
+            { kind: 'set_node', nodeId: client.id, field: 'retry', value: { maxRetries: 2, backoff: 'exponential', baseDelayMs: 300, jitter: 'full' } },
           ]
-        : undefined,
+        : undefined;
+    },
+  },
+  {
+    label: 'Read from the primary',
+    question: 'What happens if every read goes to the primary?',
+    changes: (spec) => {
+      const readers = spec.nodes.filter((n) => n.config?.readPreference !== undefined || spec.links.some((l) => l.from === n.id && spec.nodes.find((t) => t.id === l.to)?.type === 'replica'));
+      return readers.length > 0 ? readers.map((n) => ({ kind: 'set_node', nodeId: n.id, field: 'readPreference', value: 'primary' }) as ExperimentChange) : undefined;
+    },
+  },
+  {
+    label: 'Synchronous replication',
+    question: 'What happens if writes wait for the replicas?',
+    changes: (spec) => {
+      const db = spec.nodes.find((n) => n.type === 'database' && spec.nodes.some((r) => r.config?.replicaOf === n.id));
+      return db ? [{ kind: 'set_node', nodeId: db.id, field: 'replication', value: { mode: 'sync' } }] : undefined;
+    },
+  },
+  {
+    label: 'Idempotent writes',
+    question: 'What happens if the database recognises repeated writes?',
+    changes: (spec) => {
+      const dbs = all(spec, 'database');
+      return dbs.length > 0 ? dbs.map((db) => ({ kind: 'set_node', nodeId: db.id, field: 'idempotentWrites', value: true }) as ExperimentChange) : undefined;
+    },
+  },
+  {
+    label: 'Apply in log order',
+    question: 'What happens if replicas apply records in log order?',
+    changes: (spec) => {
+      const replicas = all(spec, 'replica').filter((r) => r.config?.replicaApply === 'arrival');
+      return replicas.length > 0 ? replicas.map((r) => ({ kind: 'set_node', nodeId: r.id, field: 'replicaApply', value: 'ordered' }) as ExperimentChange) : undefined;
+    },
+  },
+  {
+    label: 'Coalesce cache misses',
+    question: 'What happens if concurrent misses share one fill?',
+    changes: (spec) => {
+      const caches = all(spec, 'cache');
+      return caches.length > 0
+        ? caches.map((c) => ({ kind: 'set_node', nodeId: c.id, field: 'cache', value: { ttlMs: 30_000, ...c.config?.cache, coalesce: true } }) as ExperimentChange)
+        : undefined;
+    },
   },
   {
     label: 'Different luck',
@@ -60,18 +120,6 @@ export function ExperimentsView() {
   const [customField, setCustomField] = useState<'concurrency' | 'processing' | 'readLatency' | 'queueCapacity'>('concurrency');
   const [customNode, setCustomNode] = useState('');
   const [customValue, setCustomValue] = useState<number | undefined>(undefined);
-
-  const ctx: PresetContext = {
-    ...(spec.nodes.find((n) => n.type === 'client') ? { client: spec.nodes.find((n) => n.type === 'client')!.id } : {}),
-    ...(spec.nodes.find((n) => n.type === 'load_balancer' || n.type === 'gateway')
-      ? { balancer: spec.nodes.find((n) => n.type === 'load_balancer' || n.type === 'gateway')!.id }
-      : {}),
-    ...(spec.nodes.find((n) => n.type === 'database') ? { db: spec.nodes.find((n) => n.type === 'database')!.id } : {}),
-    ...(spec.nodes.find((n) => n.type === 'api' || n.type === 'service')
-      ? { firstApi: spec.nodes.find((n) => n.type === 'api' || n.type === 'service')!.id }
-      : {}),
-    duration: spec.durationMs ?? 20_000,
-  };
 
   const applied = useMemo(() => applyExperiment(spec, { name, changes }), [spec, name, changes]);
 
@@ -101,12 +149,12 @@ export function ExperimentsView() {
         </div>
         <div className="row" style={{ flexWrap: 'wrap' }}>
           {PRESETS.map((preset) => {
-            const preset_changes = preset.changes(ctx);
+            const preset_changes = preset.changes(spec);
+            if (!preset_changes) return null;
             return (
               <button
                 key={preset.label}
                 className="btn"
-                disabled={!preset_changes}
                 title={preset.question}
                 onClick={() => {
                   setChanges(preset_changes ?? []);

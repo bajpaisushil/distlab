@@ -254,12 +254,13 @@ export function validateSimulationSpec(input: unknown): ValidationResult {
       const cfg = node?.config;
       if (!cfg || typeof cfg !== 'object') return;
       const path = `nodes[${i}].config`;
-      validateRoutingConfig(cfg, path, push, context);
-      validateDataConfig(cfg, path, push, context);
-      validateReliabilityConfig(cfg, path, push, context);
-      validateQueueConfig(cfg, path, push, context);
-      validateConsensusConfig(cfg, path, push, context);
-      validateLockConfig(cfg, path, push, context);
+      const own: SpecValidationContext = { ...context, self: { id: node.id, type: node.type } };
+      validateRoutingConfig(cfg, path, push, own);
+      validateDataConfig(cfg, path, push, own);
+      validateReliabilityConfig(cfg, path, push, own);
+      validateQueueConfig(cfg, path, push, own);
+      validateConsensusConfig(cfg, path, push, own);
+      validateLockConfig(cfg, path, push, own);
     });
   }
 

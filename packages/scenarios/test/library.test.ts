@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateSimulationSpec, type SimEvent } from '@distlab/shared';
+import { validateSimulationSpec } from '@distlab/shared';
 import { createSimulation, type SimulationWorld } from '@distlab/simulation-engine';
 import { SCENARIOS, findScenario } from '../src/index.js';
 
@@ -133,15 +133,48 @@ describe('each scenario shows what it says it shows', () => {
     expect(Math.max(...fastFails.map((e) => e.payload.latency))).toBeLessThan(50);
   });
 
-  it('message-duplication: the work happens more often than it was asked for', () => {
+  it('message-duplication: the ledger records charges twice', () => {
     const world = run('message-duplication');
+    const twice = world.snapshot().modules.data.duplicateWritesApplied;
     const created = world.simulation.log.byType('REQUEST_CREATED').length;
-    const processedAtApi = world.simulation.log
-      .byType('REQUEST_PROCESSING_STARTED')
-      .filter((e: SimEvent<'REQUEST_PROCESSING_STARTED'>) => e.payload.nodeId === 'api').length;
-    expect(processedAtApi).toBeGreaterThan(created * 1.1);
-    // The client still settles each request exactly once.
+    expect(twice).toBeGreaterThan(created * 0.08);
+    // Clients settle each request exactly once all the same.
     const settled = world.snapshot().requests.completed + world.snapshot().requests.failed;
     expect(settled).toBeLessThanOrEqual(created);
+  });
+
+  it('database-replication: replicas take read load, with occasional stale reads', () => {
+    const data = run('database-replication').snapshot().modules.data;
+    expect(data.storageLoad['replica-a']).toBeGreaterThan(data.reads * 0.2);
+    expect(data.storageLoad['replica-b']).toBeGreaterThan(data.reads * 0.2);
+    expect(data.staleReads).toBeGreaterThan(0);
+    expect(data.staleReads / data.reads).toBeLessThan(0.15);
+  });
+
+  it('replica-lag: the distant replica is far more stale than the near one', () => {
+    const data = run('replica-lag').snapshot().modules.data;
+    const near = data.replicas.find((r) => r.replicaId === 'replica-a')!;
+    const far = data.replicas.find((r) => r.replicaId === 'replica-b')!;
+    expect(far.meanLagMs).toBeGreaterThan(near.meanLagMs * 5);
+    expect(far.staleRate).toBeGreaterThan(near.staleRate * 3);
+  });
+
+  it('message-reordering: arrival-order apply rolls keys back', () => {
+    const world = run('message-reordering');
+    expect(world.snapshot().modules.data.versionRegressions).toBeGreaterThan(5);
+  });
+
+  it('thundering-herd: each expiry of the hot key stampedes the database', () => {
+    const world = run('thundering-herd');
+    const misses = world.simulation.log.byType('CACHE_MISS').filter((e) => e.payload.key === 'key-0' && e.payload.reason === 'expired');
+    // Misses cluster just after each 2s expiry.
+    const bursts = new Map<number, number>();
+    for (const miss of misses) {
+      const bucket = Math.floor(miss.at / 100);
+      bursts.set(bucket, (bursts.get(bucket) ?? 0) + 1);
+    }
+    expect(Math.max(...bursts.values())).toBeGreaterThan(20);
+    const db = world.snapshot().nodes.find((n) => n.id === 'db')!;
+    expect(db.maxQueueDepth).toBeGreaterThan(20);
   });
 });

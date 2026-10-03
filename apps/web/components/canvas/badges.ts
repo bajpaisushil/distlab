@@ -31,5 +31,16 @@ export function nodeBadges(node: NodeSpec, modules: ModuleTelemetry | undefined)
   if (node.type === 'load_balancer' || node.type === 'gateway') {
     badges.push({ label: STRATEGY_SHORT[routingStrategyOf(node.config ?? {})] ?? 'routing' });
   }
+  for (const replica of modules?.data.replicas ?? []) {
+    if (replica.replicaId !== node.id) continue;
+    const last = replica.lag[replica.lag.length - 1];
+    if (last) badges.push({ label: `lag ${Math.round(last.value)}ms`, tone: last.value > 500 ? 'warning' : 'good' });
+    if (replica.staleReads > 0) badges.push({ label: `${Math.round(replica.staleRate * 100)}% stale`, tone: 'warning' });
+  }
+  for (const cache of modules?.data.caches ?? []) {
+    if (cache.nodeId === node.id && cache.hits + cache.misses > 0) {
+      badges.push({ label: `hit ${Math.round(cache.hitRatio * 100)}%`, tone: cache.hitRatio > 0.8 ? 'good' : 'warning' });
+    }
+  }
   return badges;
 }
