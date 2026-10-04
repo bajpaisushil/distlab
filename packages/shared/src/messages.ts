@@ -36,6 +36,11 @@ export type OperationType =
   | 'HTTP_PUT'
   | 'DB_READ'
   | 'DB_WRITE'
+  /** A read that must go to the primary, whatever the caller's read preference. */
+  | 'READ_PRIMARY'
+  /** A read that must go to a replica, whatever the caller's read preference. */
+  | 'READ_REPLICA'
+  | 'WRITE'
   | 'RPC'
   | 'ENQUEUE'
   | (string & {});
@@ -147,4 +152,11 @@ export function isResponse(message: Message): message is ResponseMessage {
 
 export function isWriteOperation(operation: OperationType): boolean {
   return operation === 'DB_WRITE' || operation === 'HTTP_POST' || operation === 'HTTP_PUT' || operation === 'WRITE';
+}
+
+/** Where a read must be served when the request itself says so; undefined defers to read preference. */
+export function readTargetOf(operation: OperationType): 'primary' | 'replica' | undefined {
+  if (operation === 'READ_PRIMARY') return 'primary';
+  if (operation === 'READ_REPLICA') return 'replica';
+  return undefined;
 }

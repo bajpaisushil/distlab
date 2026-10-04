@@ -69,6 +69,24 @@ const PRESETS: readonly Preset[] = [
     },
   },
   {
+    label: 'Replication delay 1s',
+    question: 'What happens if replication delay becomes 1 second?',
+    changes: (spec) => {
+      const replicas = all(spec, 'replica');
+      return replicas.length > 0 ? replicas.map((r) => ({ kind: 'set_node', nodeId: r.id, field: 'replicationDelay', value: 1000 }) as ExperimentChange) : undefined;
+    },
+  },
+  {
+    label: 'Database down 10s',
+    question: 'What if the database becomes unavailable for 10 seconds?',
+    changes: (spec) => {
+      const db = first(spec, 'database');
+      return db
+        ? [{ kind: 'add_fault', fault: { kind: 'node_unavailable', at: Math.round((spec.durationMs ?? 20_000) / 4), nodeId: db.id, durationMs: 10_000 } }]
+        : undefined;
+    },
+  },
+  {
     label: 'Synchronous replication',
     question: 'What happens if writes wait for the replicas?',
     changes: (spec) => {
@@ -132,6 +150,37 @@ const PRESETS: readonly Preset[] = [
   },
 ];
 
+type CustomField =
+  | 'concurrency'
+  | 'queueCapacity'
+  | 'processing'
+  | 'readLatency'
+  | 'writeLatency'
+  | 'replicationDelay'
+  | 'failureProbability'
+  | 'callTimeoutMs'
+  | 'crash_at'
+  | 'unavailable_at';
+
+const CUSTOM_FIELDS: readonly { value: CustomField; label: string }[] = [
+  { value: 'concurrency', label: 'Concurrency' },
+  { value: 'queueCapacity', label: 'Queue capacity' },
+  { value: 'processing', label: 'Processing (ms)' },
+  { value: 'readLatency', label: 'Read latency (ms)' },
+  { value: 'writeLatency', label: 'Write latency (ms)' },
+  { value: 'replicationDelay', label: 'Replication delay (ms)' },
+  { value: 'failureProbability', label: 'Failure probability (0–1)' },
+  { value: 'callTimeoutMs', label: 'Call timeout (ms)' },
+  { value: 'crash_at', label: 'Crashes at (ms)' },
+  { value: 'unavailable_at', label: 'Unavailable for 10s from (ms)' },
+];
+
+function customChange(field: CustomField, nodeId: string, value: number): ExperimentChange {
+  if (field === 'crash_at') return { kind: 'add_fault', fault: { kind: 'node_crash', at: value, nodeId } };
+  if (field === 'unavailable_at') return { kind: 'add_fault', fault: { kind: 'node_unavailable', at: value, nodeId, durationMs: 10_000 } };
+  return { kind: 'set_node', nodeId, field, value };
+}
+
 /** "What if…?" — the current design as the baseline, the same design with changes as the variant. */
 export function ExperimentsView() {
   const spec = useLab((s) => s.spec);
@@ -140,7 +189,7 @@ export function ExperimentsView() {
   const [name, setName] = useState('Variant');
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<{ a: RunSummary; b: RunSummary } | null>(null);
-  const [customField, setCustomField] = useState<'concurrency' | 'processing' | 'readLatency' | 'queueCapacity'>('concurrency');
+  const [customField, setCustomField] = useState<CustomField>('concurrency');
   const [customNode, setCustomNode] = useState('');
   const [customValue, setCustomValue] = useState<number | undefined>(undefined);
 
@@ -229,12 +278,7 @@ export function ExperimentsView() {
             <SelectField
               label="Setting"
               value={customField}
-              options={[
-                { value: 'concurrency', label: 'Concurrency' },
-                { value: 'queueCapacity', label: 'Queue capacity' },
-                { value: 'processing', label: 'Processing (ms)' },
-                { value: 'readLatency', label: 'Read latency (ms)' },
-              ]}
+              options={CUSTOM_FIELDS.map((f) => ({ value: f.value, label: f.label }))}
               onChange={(v) => setCustomField(v as typeof customField)}
             />
           </div>
@@ -245,7 +289,7 @@ export function ExperimentsView() {
             className="btn"
             disabled={!customNode || customValue === undefined}
             onClick={() => {
-              setChanges([...changes, { kind: 'set_node', nodeId: customNode, field: customField, value: customValue }]);
+              setChanges([...changes, customChange(customField, customNode, customValue!)]);
               setResult(null);
             }}
           >

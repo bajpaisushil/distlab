@@ -243,6 +243,24 @@ export function addWorkload(spec: SimulationSpec, clientId: NodeId): { spec: Sim
   return { spec: { ...spec, workloads: [...spec.workloads, workload] }, id };
 }
 
+/**
+ * One request from a client at time `at` — a workload that fires once. It is
+ * part of the scenario like any other, so the run stays replayable and
+ * exportable. All one-off requests share key-0, so a write and a later read
+ * meet on the same data.
+ */
+export function addOneRequest(
+  spec: SimulationSpec,
+  clientId: NodeId,
+  operation: WorkloadSpec['operation'],
+  at: number,
+): { spec: SimulationSpec; id: string } {
+  const slug = String(operation).toLowerCase().replace(/_/g, '-');
+  const id = uniqueId(`${clientId}-${slug}-at-${Math.round(at)}`, spec.workloads.map((w) => w.id));
+  const workload: WorkloadSpec = { id, clientId, operation, arrival: { kind: 'once', count: 1 }, startAt: Math.round(at), keys: 1, deadlineMs: 2000 };
+  return { spec: { ...spec, workloads: [...spec.workloads, workload] }, id };
+}
+
 export function updateWorkload(spec: SimulationSpec, id: string, patch: Partial<WorkloadSpec>): SimulationSpec {
   return {
     ...spec,

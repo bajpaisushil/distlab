@@ -114,6 +114,19 @@ describe('compareSnapshots', () => {
     expect(byId.has('dropped')).toBe(true);
   });
 
+  it('compares replication lag when the design has replicas', () => {
+    const replicated = findScenario('eventual-consistency')!.spec;
+    const variant = applyExperiment(replicated, {
+      name: 'Replication delay 1s',
+      changes: ['replica-a', 'replica-b'].map((id) => ({ kind: 'set_node' as const, nodeId: id, field: 'replicationDelay', value: 1000 })),
+    });
+    expect(variant.ok).toBe(true);
+    if (!variant.ok) return;
+    const lag = compareSnapshots(snapshotOf(replicated), snapshotOf(variant.variant)).find((d) => d.id === 'replication_lag_mean')!;
+    expect(lag.b).toBeGreaterThan(lag.a);
+    expect(verdictOf(lag)).toBe('worse');
+  });
+
   it('reports identical runs as identical', () => {
     const snapshot = snapshotOf(baseline);
     for (const delta of compareSnapshots(snapshot, snapshot)) expect(verdictOf(delta)).toBe('same');

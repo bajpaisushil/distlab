@@ -236,6 +236,23 @@ describe('each scenario shows what it says it shows', () => {
     expect(fenced.simulation.log.byType('FENCED_WRITE_REJECTED')[0]!.payload.writer).toBe('billing-1');
   });
 
+  it('eventual-consistency: replica reads are stale for a window after each write; primary reads never are', () => {
+    const world = run('eventual-consistency');
+    const log = world.simulation.log;
+    const workloadOf = new Map(log.byType('REQUEST_CREATED').map((e) => [e.payload.requestId, e.payload.workloadId]));
+    const stale = log.byType('STALE_READ');
+    expect(stale.length).toBeGreaterThan(20);
+    expect(stale.every((e) => workloadOf.get(e.payload.requestId) === 'read-replica')).toBe(true);
+    // Primary reads went to the primary only; replica reads only to replicas.
+    const routed = log.byType('REQUEST_ROUTED').filter((e) => e.payload.from === 'api');
+    expect(routed.filter((e) => workloadOf.get(e.payload.requestId) === 'read-primary').every((e) => e.payload.to === 'db')).toBe(true);
+    expect(routed.filter((e) => workloadOf.get(e.payload.requestId) === 'read-replica').every((e) => e.payload.to !== 'db')).toBe(true);
+    const replicas = world.snapshot().modules.data.replicas;
+    const a = replicas.find((r) => r.replicaId === 'replica-a')!;
+    const b = replicas.find((r) => r.replicaId === 'replica-b')!;
+    expect(b.staleRate).toBeGreaterThan(a.staleRate * 2);
+  });
+
   it('thundering-herd: each expiry of the hot key stampedes the database', () => {
     const world = run('thundering-herd');
     const misses = world.simulation.log.byType('CACHE_MISS').filter((e) => e.payload.key === 'key-0' && e.payload.reason === 'expired');

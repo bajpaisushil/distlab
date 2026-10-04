@@ -68,6 +68,8 @@ interface LabState {
   updateLink(id: LinkId, patch: Partial<LinkSpec>): void;
   removeLink(id: LinkId): void;
   addWorkload(clientId: NodeId): string;
+  /** Schedules a single request from a client at the current moment. */
+  sendOneRequest(clientId: NodeId, operation: WorkloadSpec['operation']): string;
   updateWorkload(id: string, patch: Partial<WorkloadSpec>): void;
   removeWorkload(id: string): void;
   addFault(fault: FaultSpec): string;
@@ -202,6 +204,11 @@ export const useLab = create<LabState>()((set, get) => {
     },
     addWorkload(clientId) {
       const result = edit.addWorkload(get().spec, clientId);
+      commit(result.spec);
+      return result.id;
+    },
+    sendOneRequest(clientId, operation) {
+      const result = edit.addOneRequest(get().spec, clientId, operation, get().frame?.now ?? 0);
       commit(result.spec);
       return result.id;
     },

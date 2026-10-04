@@ -66,6 +66,22 @@ const METRICS: readonly {
     applies: (s) => s.modules.reliability.retries > 0 || s.modules.reliability.circuits.length > 0,
   },
   {
+    id: 'replication_lag_max',
+    label: 'Max replication lag',
+    unit: 'ms',
+    direction: 'lower_is_better',
+    read: (s) => maxOf(s.modules.data.replicas, (r) => r.maxLagMs),
+    applies: (s) => s.modules.data.replicas.length > 0,
+  },
+  {
+    id: 'replication_lag_mean',
+    label: 'Mean replication lag (worst replica)',
+    unit: 'ms',
+    direction: 'lower_is_better',
+    read: (s) => maxOf(s.modules.data.replicas, (r) => r.meanLagMs),
+    applies: (s) => s.modules.data.replicas.length > 0,
+  },
+  {
     id: 'stale_reads',
     label: 'Stale reads',
     unit: 'count',

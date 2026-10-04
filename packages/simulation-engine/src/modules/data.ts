@@ -1,6 +1,7 @@
 import { acceptOrdered, unacknowledged, type ReplicationRecord } from '@distlab/algorithms';
 import {
   isWriteOperation,
+  readTargetOf,
   sampleLatency,
   type EventId,
   type LatencySpec,
@@ -626,7 +627,8 @@ export function createDataPlane(services: ModuleServices): DataPlane {
       const others = candidates.filter((c) => !STORAGE.has(c.type));
       const primariesOnly = storage.filter((c) => c.type === 'database');
       if (isWriteOperation(body.operation)) return [...others, ...primariesOnly];
-      switch (node.config.readPreference ?? 'any') {
+      // A request that names its target (READ_PRIMARY / READ_REPLICA) overrides the caller's preference.
+      switch (readTargetOf(body.operation) ?? node.config.readPreference ?? 'any') {
         case 'primary':
           return [...others, ...primariesOnly];
         case 'replica': {

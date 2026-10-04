@@ -6,7 +6,7 @@ import { NodeRefField, NumberField, PercentField, SelectField } from '@/componen
 import { Icon } from '@/components/ui/icons';
 import { Header, Section } from './common';
 
-const OPERATIONS = ['HTTP_GET', 'HTTP_POST', 'DB_READ', 'DB_WRITE', 'RPC', 'ENQUEUE'] as const;
+const OPERATIONS = ['HTTP_GET', 'HTTP_POST', 'DB_READ', 'DB_WRITE', 'WRITE', 'READ_PRIMARY', 'READ_REPLICA', 'RPC', 'ENQUEUE'] as const;
 
 function defaultArrival(kind: ArrivalSpec['kind']): ArrivalSpec {
   switch (kind) {

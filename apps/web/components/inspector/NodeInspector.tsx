@@ -140,6 +140,7 @@ export function NodeInspector({ id }: { id: NodeId }) {
         ) : null}
       </Section>
       <ModuleNodeSections node={node} />
+      {node.type === 'client' ? <SendOneRequest clientId={id} /> : null}
       {node.type === 'client' ? (
         <Section title="Workloads">
           {workloads.length === 0 ? <div className="muted">This client sends nothing.</div> : null}
@@ -154,5 +155,39 @@ export function NodeInspector({ id }: { id: NodeId }) {
         </Section>
       ) : null}
     </>
+  );
+}
+
+/**
+ * Issue a single write or read at the current moment, then press play and
+ * watch it in Events and Traces — the way to see eventual consistency happen.
+ */
+function SendOneRequest({ clientId }: { clientId: NodeId }) {
+  const spec = useLab((s) => s.spec);
+  const now = useLab((s) => s.frame?.now ?? 0);
+  const lab = useLab.getState();
+  const hasStorage = spec.nodes.some((n) => n.type === 'database');
+  const hasReplica = spec.nodes.some((n) => n.type === 'replica');
+  const actions: { label: string; operation: string }[] = hasStorage
+    ? [
+        { label: 'Write', operation: 'WRITE' },
+        { label: 'Read primary', operation: 'READ_PRIMARY' },
+        ...(hasReplica ? [{ label: 'Read replica', operation: 'READ_REPLICA' }] : []),
+      ]
+    : [{ label: 'HTTP GET', operation: 'HTTP_GET' }];
+  return (
+    <Section title="Send one request" open>
+      <div className="field-hint">
+        Sent at {(now / 1000).toFixed(2)}s, then press play. All one-off requests use the same key, so a write followed by a replica read shows whether
+        the replica has caught up.
+      </div>
+      <div className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
+        {actions.map((a) => (
+          <button key={a.operation} className="btn" onClick={() => lab.sendOneRequest(clientId, a.operation)} data-testid={`send-${a.operation}`}>
+            {a.label}
+          </button>
+        ))}
+      </div>
+    </Section>
   );
 }

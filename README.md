@@ -20,7 +20,8 @@ inspector. Undo and redo work everywhere.
 
 **Run and rewind.** Play, pause, step one event at a time, step backwards, scrub the timeline, or
 jump to any event and ask what the system looked like just before it. Change playback speed. The
-same seed always produces the same run, event for event.
+same seed always produces the same run, event for event. Select a client to send a single
+request at the current moment — a write, a primary read or a replica read — and watch it.
 
 **Break things.** Faults are scheduled events, not visual effects, and everything after them
 emerges from the simulation:
@@ -77,7 +78,7 @@ scenario in the URL. Your last session is restored from IndexedDB.
 | Failures | Node failure · Cascading failure · Retry storm · Circuit breaker |
 | Network | Network partition · Packet loss and deadlines · Message reordering |
 | Load | Capacity saturation · Thundering herd |
-| Data | Database replication · Replica lag · Message duplication |
+| Data | Database replication · Eventual consistency · Replica lag · Message duplication |
 | Messaging | Queue overload · Dead-letter queue |
 | Coordination | Leader election · Split brain · Distributed lock contention |
 
@@ -146,8 +147,8 @@ Nothing in `packages/` imports React. The engine is tested in Node with no brows
 ```bash
 npm install
 npm run dev          # http://localhost:3000
-npm test             # 434 unit and simulation tests
-npm run test:e2e     # 10 Playwright tests against a production build
+npm test             # 437 unit and simulation tests
+npm run test:e2e     # 11 Playwright tests against a production build
 npm run typecheck
 ```
 

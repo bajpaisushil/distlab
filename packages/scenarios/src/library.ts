@@ -474,6 +474,50 @@ export const SCENARIOS: readonly Scenario[] = [
     observe: ['storage load across the three databases', 'the replication lag chart', 'stale reads by replica'],
   }),
   scenario({
+    id: 'eventual-consistency',
+    name: 'Eventual consistency',
+    description:
+      'One key, one primary and two replicas: Replica A applies writes after ~100ms, Replica B after ~600ms. Every second a write lands on the primary; meanwhile one stream of reads always goes to the primary and another always to a replica. Primary reads are never stale. Replica reads are stale for a window after each write — longer on Replica B. Select the client and use “Send one request” to issue your own write and reads.',
+    category: 'Data',
+    difficulty: 'intro',
+    seed: 'eventual-consistency',
+    durationMs: 10_000,
+    nodes: [
+      { id: 'client', type: 'client', label: 'Client' },
+      { id: 'api', type: 'api', label: 'API', config: { processing: 2, concurrency: 32 } },
+      { id: 'db', type: 'database', label: 'Primary', config: { readLatency: 5, writeLatency: 10 } },
+      { id: 'replica-a', type: 'replica', label: 'Replica A', config: { replicaOf: 'db', readLatency: 5, replicationDelay: { kind: 'normal', mean: 100, stddev: 20 } } },
+      { id: 'replica-b', type: 'replica', label: 'Replica B', config: { replicaOf: 'db', readLatency: 5, replicationDelay: { kind: 'normal', mean: 600, stddev: 100 } } },
+    ],
+    links: [
+      { from: 'client', to: 'api', latency: 3 },
+      { from: 'api', to: 'db', latency: 2 },
+      { from: 'api', to: 'replica-a', latency: 2 },
+      { from: 'api', to: 'replica-b', latency: 2 },
+      { from: 'db', to: 'replica-a', latency: 5 },
+      { from: 'db', to: 'replica-b', latency: 5 },
+    ],
+    layout: {
+      client: { x: 0, y: 0 },
+      api: { x: 260, y: 0 },
+      db: { x: 540, y: 0 },
+      'replica-a': { x: 820, y: -130 },
+      'replica-b': { x: 820, y: 130 },
+    },
+    workloads: [
+      { id: 'writes', clientId: 'client', operation: 'WRITE', arrival: { kind: 'burst', count: 1, everyMs: 1000 }, startAt: 500, keys: 1, deadlineMs: 2000 },
+      { id: 'read-primary', clientId: 'client', operation: 'READ_PRIMARY', arrival: { kind: 'constant', ratePerSec: 20 }, keys: 1, deadlineMs: 2000 },
+      { id: 'read-replica', clientId: 'client', operation: 'READ_REPLICA', arrival: { kind: 'constant', ratePerSec: 40 }, keys: 1, deadlineMs: 2000 },
+    ],
+    learningObjectives: [
+      'A write is acknowledged by the primary before the replicas have it — that is what asynchronous replication means.',
+      'Reading your own write from the primary always works; reading it from a replica only works once the replica has caught up.',
+      'Eventual consistency has a measurable window: here roughly the replication delay, so the slower replica is stale for longer.',
+      'Try the What-if “Read from the primary”, or make replication synchronous, and watch stale reads disappear — at a cost in write latency.',
+    ],
+    observe: ['stale reads by replica in Metrics', 'STALE_READ events, each with how stale it was', 'the replication lag chart'],
+  }),
+  scenario({
     id: 'replica-lag',
     name: 'Replica lag',
     description:

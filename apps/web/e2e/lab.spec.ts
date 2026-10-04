@@ -176,3 +176,22 @@ test('keeps AI off until the user sends, and shows exactly what would be sent', 
   await expect(page.getByTestId('copilot-preview')).toContainText('[F1]');
   expect(external).toEqual([]);
 });
+
+test('sends one write and one replica read by hand, and asks what-if replication slows', async ({ page }) => {
+  const errors = watchErrors(page);
+  await page.goto('/');
+  await page.getByRole('tab', { name: 'Library' }).click();
+  await page.getByTestId('scenario-eventual-consistency').click();
+  await page.getByTestId('node-client').click();
+  await page.getByTestId('send-WRITE').click();
+  await page.getByTestId('send-READ_REPLICA').click();
+  await expect(page.getByTestId('inspector')).toContainText('client-write-at-0');
+  await expect(page.getByTestId('inspector')).toContainText('client-read-replica-at-0');
+
+  await page.getByRole('tab', { name: 'What-if' }).click();
+  await page.getByRole('button', { name: 'Replication delay 1s' }).click();
+  await page.getByTestId('run-experiment').click();
+  await expect(page.getByTestId('comparison')).toContainText('Max replication lag', { timeout: 30_000 });
+  await expect(page.getByTestId('comparison')).toContainText('Stale reads');
+  expect(errors).toEqual([]);
+});
